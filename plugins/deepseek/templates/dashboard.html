@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>DeepSeek 群AI · 仪表盘</title>
+<style>
+body{background:#1a1d23;color:#d7dae0;font:14px/1.6 "Microsoft YaHei",sans-serif;margin:0}
+nav{background:#22262e;padding:10px 20px;border-bottom:1px solid #333}
+nav a{color:#7aa2f7;margin-right:16px;text-decoration:none}
+.wrap{padding:20px;max-width:1000px;margin:auto}
+h2{font-size:16px}
+table{border-collapse:collapse;width:100%;background:#22262e}
+th,td{padding:8px 10px;border-bottom:1px solid #2e333c;text-align:left;font-size:13px}
+th{color:#8b93a7}
+button{background:#3b4252;color:#eceff4;border:0;border-radius:4px;padding:5px 12px;cursor:pointer;margin-right:6px}
+button:hover{background:#4c566a}
+.on{color:#9ece6c}.off{color:#e06c75}
+a{color:#7aa2f7}
+</style>
+</head>
+<body>
+<nav>
+  <a href="/deepseek/dashboard?v={{ PLUGIN_VERSION }}">群开关</a>
+  <a href="/deepseek/settings?v={{ PLUGIN_VERSION }}">全局设置</a>
+  <a href="/deepseek/mcp?v={{ PLUGIN_VERSION }}">MCP 工具</a>
+  <a href="/deepseek/memory?v={{ PLUGIN_VERSION }}">群友记忆</a>
+  <a href="/deepseek/runs?v={{ PLUGIN_VERSION }}">后台/轮询</a>
+  <a href="/deepseek/prompts?v={{ PLUGIN_VERSION }}">提示词</a>
+  <span class="hint" style="float:right">v{{ PLUGIN_VERSION }}</span>
+</nav>
+<div class="wrap">
+<h2>群列表</h2>
+<table><thead><tr>
+<th>群号</th><th>状态</th><th>最后活跃</th><th>Token 命中/未命中/输出（近200次调用）</th><th>操作</th>
+</tr></thead><tbody id="rows"></tbody></table>
+</div>
+<script>
+async function load(){
+  const r = await fetch('/deepseek/api/groups').then(r=>r.json());
+  const tb = document.getElementById('rows');
+  tb.innerHTML = '';
+  for (const g of (r.groups||[])) {
+    const tr = document.createElement('tr');
+    const t = g.last_active ? new Date(g.last_active*1000).toLocaleString() : '-';
+    const u = g.usage||{};
+    tr.innerHTML = `<td>${g.group_id}</td>
+      <td class="${g.enabled?'on':'off'}">${g.enabled?'开启':'关闭'}</td>
+      <td>${t}</td>
+      <td>${u.cache_hit||0} / ${Math.max(0,(u.tokens_in||0)-(u.cache_hit||0))} / ${u.tokens_out||0}</td>
+      <td></td>`;
+    const td = tr.lastElementChild;
+    const b1 = document.createElement('button');
+    b1.textContent = g.enabled?'关闭':'开启';
+    b1.onclick = async ()=>{await fetch(`/deepseek/api/groups/${g.group_id}/toggle`,{method:'POST'});load();};
+    const b2 = document.createElement('button');
+    b2.textContent='设置';
+    b2.onclick = ()=>location.href=`/deepseek/group?gid=${g.group_id}&v={{ PLUGIN_VERSION }}`;
+    const b3 = document.createElement('button');
+    b3.textContent='清空记忆';
+    b3.onclick = async ()=>{if(confirm('清空该群对话历史与摘要？')){await fetch(`/deepseek/api/groups/${g.group_id}/reset-memory`,{method:'POST'});load();}};
+    td.append(b1,b2,b3);
+    tb.appendChild(tr);
+  }
+}
+load();
+</script>
+</body></html>

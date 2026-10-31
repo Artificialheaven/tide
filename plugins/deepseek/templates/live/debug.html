@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>实时调试台 · DeepSeek</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #131318; color: #d8d8e0;
+    font-family: "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+    font-size: 13px; padding-bottom: 60px; }
+  #bar { position: sticky; top: 0; z-index: 10; padding: 8px 14px;
+    background: #1c1c24; border-bottom: 1px solid #333; display: flex;
+    flex-wrap: wrap; gap: 10px; align-items: center; }
+  #bar label { white-space: nowrap; }
+  #bar input[type=text] { width: 150px; background:#101016; border:1px solid #444;
+    color:#eee; padding:3px 6px; border-radius:4px; }
+  button { background:#2c2c38; color:#ddd; border:1px solid #555;
+    padding:3px 10px; border-radius:5px; cursor:pointer; font-size:12px; }
+  button:hover { background:#3a3a4a; }
+  .dot { display:inline-block; width:9px; height:9px; border-radius:50%;
+    background:#e05656; }
+  .dot.on { background:#5fd07a; }
+  #feed { padding: 10px 14px; max-width: 1100px; margin: 0 auto; }
+  .ev { border-left: 3px solid #444; padding: 5px 10px; margin: 4px 0;
+    background:#1b1b22; border-radius:0 6px 6px 0; }
+  .ev.chat { border-color:#7a9; }
+  .ev.gate { border-color:#e0a040; }
+  .ev.turn_start { border-color:#5aa8e6; margin-top:14px; background:#1f2430; }
+  .ev.turn_end { border-color:#5aa8e6; opacity:.85; }
+  .ev.model_round { border-color:#9aa7ff; }
+  .ev.tool_result { border-color:#b9b9c4; }
+  .ev.assistant_send { border-color:#58e6a8; background:#16261f; }
+  .ev.assistant_send.final { border-width:4px; }
+  .ev.compact { border-color:#c9a7ff; }
+  .ev.notice { border-color:#ffd58a; }
+  .ev.prompt { border-color:#e6c25a; }
+  .ev.meta { border-color:#e05656; background:#2a1a1a; }
+  .ts { color:#777; font-family:monospace; margin-right:8px; }
+  .tag { display:inline-block; font-size:11px; padding:0 6px; border-radius:8px;
+    background:#33334d; color:#bcd; margin-right:6px; }
+  .gid { color:#888; font-family:monospace; }
+  pre { white-space:pre-wrap; word-break:break-word; margin-top:4px;
+    font-family: Consolas, "Courier New", monospace; }
+  details { margin-top:4px; }
+  summary { cursor:pointer; color:#9ab; }
+  .reasoning { color:#b8a8e8; background:#191626; padding:6px 9px;
+    border-radius:5px; margin-top:5px; }
+  .chip { display:inline-block; background:#2a2a40; border:1px solid #4a4a66;
+    border-radius:5px; padding:1px 7px; margin:2px 4px 2px 0; font-size:11px;
+    font-family:monospace; }
+  .chip.bad { border-color:#804040; color:#e8a0a0; }
+  .send-text { color:#88e0a0; font-size:14px; }
+  #tokenMask { position:fixed; inset:0; z-index:20; display:flex;
+    align-items:center; justify-content:center; background:rgba(10,10,14,.85); }
+  #tokenMask .box { width:380px; padding:22px; background:#202028;
+    border:1px solid #444; border-radius:12px; }
+  #tokenMask input { width:100%; margin:10px 0; padding:7px; background:#111;
+    border:1px solid #555; color:#eee; border-radius:6px; }
+  #tokenMask button { padding:7px 18px; background:#3d7dff; color:#fff;
+    border:0; border-radius:6px; }
+  .hint { color:#9a9aa4; font-size:12px; margin-top:10px; }
+  .round-n { color:#9aa7ff; font-weight:700; }
+  .usage { color:#7a7a88; font-size:11px; font-family:monospace; }
+</style>
+</head>
+<body>
+<div id="bar">
+  <span><span class="dot" id="dot"></span> <span id="statusText">未连接</span></span>
+  <label>调试群
+    <select id="groupSel" style="background:#101016;border:1px solid #444;color:#eee;padding:3px 6px;border-radius:4px;min-width:170px">
+      <option value="">加载中…</option>
+    </select>
+  </label>
+  <button id="saveGroup" title="保存选择并按该群刷新页面">💾 保存并刷新</button>
+  <button id="openDanmaku" title="新窗口打开当前群的弹幕机">🎬 弹幕机</button>
+  <button id="copyDanmaku" title="复制带 token 的弹幕机链接（可直接贴 OBS）">复制弹幕链接</button>
+  <span id="evtCount" class="usage"></span>
+  <label><input type="checkbox" id="f_prompt" checked> 本轮完整 prompt</label>
+  <label><input type="checkbox" id="autoscroll" checked> 自动滚动</label>
+  <button id="pause">⏸ 暂停</button>
+  <button id="clear">清屏</button>
+  <button id="export">导出 JSON</button>
+  <span style="flex:1"></span>
+  <label>显示：
+    <label><input type="checkbox" data-f="all" checked> 全选</label>
+  </label>
+</div>
+<div id="feed"></div>
+
+<div id="tokenMask"><div class="box">
+  <b>实时调试台 · 事件订阅</b>
+  <input id="tokenInput" type="password" placeholder="粘贴触发 token（trigger_token）" autocomplete="off">
+  <button id="tokenOk">连接</button>
+  <div class="hint">token 只存本浏览器 localStorage；勾选「本轮完整 prompt」后重连，
+    才能收到每次模型调用前的完整 messages。</div>
+  <div class="hint" id="authWarn" style="display:none;color:#e8a0a0">
+    token 无效或已被轮换，请重新粘贴（插件设置页可查看当前 trigger_token）。</div>
+</div></div>
+
+<script>
+'use strict';
+const $ = s => document.querySelector(s);
+const qs = new URLSearchParams(location.search);
+const LS = {
+  get(k,d){ try{ const v=localStorage.getItem('live_dbg_'+k);
+    return v===null?d:v;}catch(e){return d;} },
+  set(k,v){ try{localStorage.setItem('live_dbg_'+k,v);}catch(e){} }
+};
+const KIND_CN = { chat:'群消息', gate:'闸门', turn_start:'回合开始',
+  prompt:'插队', model_round:'模型调用', tool_result:'工具结果',
+  assistant_send:'实际发送', compact:'上下文压缩', notice:'长跑通知',
+  turn_end:'回合结束', meta:'传输' };
+const state = { token: qs.get('token') || LS.get('token',''), es:null,
+  events: [], paused:false, pending:[], eventCount:0 };
+
+// 当前生效的群：URL 参数优先（保存并刷新后由 URL 携带），其次 localStorage
+function curGroup(){ return qs.get('groups') || LS.get('groups','') || ''; }
+function danmakuUrl(){
+  const p = new URLSearchParams({ token: state.token });
+  const g = curGroup();
+  if (g) p.set('groups', g);
+  return '/live/danmaku?' + p.toString();
+}
+async function probeState(){
+  const r = await fetch('/live/api/state?token='
+    + encodeURIComponent(state.token), { cache:'no-store' });
+  if (r.status === 401) return { auth:false };
+  if (!r.ok) return { auth:null };
+  return { auth:true, data: await r.json() };
+}
+function showTokenMask(badToken){
+  $('#authWarn').style.display = badToken ? 'block' : 'none';
+  $('#tokenMask').style.display = 'flex';
+}
+function fillGroupSel(data){
+  const sel = $('#groupSel');
+  const cur = curGroup();
+  sel.innerHTML = '<option value="">全部群 / 私聊</option>';
+  (data.groups || []).forEach(g => {
+    const o = document.createElement('option');
+    o.value = g.group_id;
+    o.textContent = g.group_id
+      + (g.enabled ? '' : '（未开启）')
+      + (g.persona ? ' · ' + g.persona : '');
+    sel.appendChild(o);
+  });
+  // URL/localStorage 里有但服务端群表没有（手误/群尚未产生会话）：补一项暴露出来
+  if (cur && ![...sel.options].some(o => o.value === cur)) {
+    const o = document.createElement('option');
+    o.value = cur; o.textContent = cur + '（不在群列表，请核对）';
+    sel.appendChild(o);
+  }
+  sel.value = cur;
+}
+async function bootstrap(){
+  if (!state.token) { showTokenMask(false); return; }
+  let res;
+  try { res = await probeState(); } catch (e) { res = { auth:null }; }
+  if (res.auth === false) {           // token 失效：别让 EventSource 傻重连
+    state.token = ''; LS.set('token','');
+    showTokenMask(true);
+    setStatus(false, 'token 无效或已轮换');
+    return;
+  }
+  if (res.auth) fillGroupSel(res.data);
+  else $('#groupSel').innerHTML =
+    '<option value="">全部群（状态接口不可达）</option>';
+  connect();
+}
+
+function esc(s){ return String(s==null?'':s).replace(/[&<>]/g,
+  c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+function nowStr(ts){ const d=new Date(ts*1000);
+  return d.toTimeString().slice(0,8); }
+
+function addEvent(ev){
+  if (ev.kind === 'meta' && ev.hello) {
+    const scope = (ev.groups && ev.groups.length) ? ev.groups.join(',') : '全部群';
+    setStatus(true, `已连接 · 监听 ${scope}${ev.include_prompt ? ' · 含prompt' : ''}`);
+    return;  // 问候帧只更新状态栏，不进时间线
+  }
+  state.events.push(ev);
+  if (state.events.length > 3000) state.events.shift();
+  if (ev.kind !== 'meta') {
+    state.eventCount++;
+    $('#evtCount').textContent = '事件 ' + state.eventCount;
+  }
+  if (state.paused) { state.pending.push(ev); return; }
+  render(ev);
+}
+
+function render(ev){
+  const feed = $('#feed');
+  const box = document.createElement('div');
+  box.className = 'ev ' + ev.kind;
+  let h = `<span class="ts">${nowStr(ev.ts)}</span>`;
+  h += `<span class="tag">${KIND_CN[ev.kind]||ev.kind}</span>`;
+  h += `<span class="gid">${esc(ev.chat_type==='private'?'私聊 ':'群 ')}${esc(ev.group_id)}</span>`;
+  if (ev.turn_id) h += ` <span class="gid">#${esc(ev.turn_id.slice(0,6))}</span>`;
+  switch (ev.kind) {
+    case 'chat':
+      h += ` <b>${esc(ev.sender_name||ev.sender_id)}</b>${ev.at_me?' @':''}：${esc(ev.text||'')}`
+        + (ev.has_media?' 📎'+(ev.media||[]).join(','):'');
+      break;
+    case 'gate':
+      h += ` ${ev.stage==='judge'?'判官':'粗筛'} → 不回复（${esc(ev.reason||'')}）`;
+      break;
+    case 'turn_start':
+      h += ` 来源=<b>${esc(ev.source)}</b>${ev.background?' 后台':''}${ev.forced?' 强制':''} `
+        + `<b>${esc(ev.sender_name||ev.sender_id||'')}</b>：${esc(ev.text||'')}`;
+      break;
+    case 'prompt':
+      h += ` <b>${esc(ev.sender_name)}</b> 插话：${esc(ev.text)}`;
+      break;
+    case 'model_round': {
+      h += ` <span class="round-n">第 ${(ev.round||0)+1} 轮</span>`;
+      if (ev.note) h += ` <span class="tag">${esc(ev.note)}</span>`;
+      const u = ev.usage || {};
+      if (u.tokens_in != null)
+        h += ` <span class="usage">in:${u.tokens_in} out:${u.tokens_out||0} cache:${u.cache_hit||0}</span>`;
+      if (ev.tool_calls && ev.tool_calls.length)
+        h += '<div>' + ev.tool_calls.map(tc =>
+          `<span class="chip">🔧 ${esc(tc.name)}</span>`).join('') + '</div>';
+      if (ev.reasoning)
+        h += `<details open><summary>💭 思考链（${esc(ev.reasoning.length)} 字）</summary>`
+          + `<div class="reasoning"><pre>${esc(ev.reasoning)}</pre></div></details>`;
+      if (ev.content)
+        h += `<pre>${esc(ev.content)}</pre>`;
+      ev.tool_calls.forEach(tc => {
+        h += `<details><summary>参数 · ${esc(tc.name)}</summary><pre>${
+          esc(JSON.stringify(tc.arguments, null, 2))}</pre></details>`;
+      });
+      if (ev.prompt_view)
+        h += `<details><summary>📜 本轮完整 prompt（发送前快照）</summary><pre>${
+          esc(ev.prompt_view)}</pre></details>`;
+      break;
+    }
+    case 'tool_result':
+      h += ` <span class="chip ${ev.ok?'':'bad'}">${ev.ok?'✓':'✗'} ${esc(ev.name)}</span>`;
+      h += `<details><summary>参数 / 结果</summary>`
+        + `<pre>${esc(JSON.stringify(ev.arguments, null, 2))}</pre>`
+        + `<pre>${esc(ev.result)}</pre></details>`;
+      break;
+    case 'assistant_send':
+      h += ` <span class="tag">${esc({interim:'边干边说',final:'终态回复',
+        loop_speech:'长跑汇报'}[ev.phase]||ev.phase)}</span>`
+        + `<div class="send-text">${esc(ev.text)}</div>`
+        + (ev.n_chunks>1?`<span class="usage">${ev.n_chunks} 条</span>`:'');
+      break;
+    case 'compact':
+      h += ` ${ev.head_msgs} 条旧消息 → ${ev.chars} 字纪要，尾部留 ${ev.tail_msgs} 条`
+        + (ev.forced?'（撞上下文上限强制压缩）':'');
+      break;
+    case 'notice':
+      h += ` [<b>${esc(ev.lifecycle)}</b>] ${esc(ev.text||'').replace(/\n/g,' ⏎ ')}`;
+      break;
+    case 'turn_end':
+      h += ` ${ev.silent?'🤫 静默':'✅ 收尾'}：${esc((ev.final_text||'').slice(0,200))}`;
+      break;
+    case 'meta':
+      h += ` ⚠ ${esc(ev.note||'传输层通知')}`;
+      break;
+    default:
+      h += ' ' + esc(JSON.stringify(ev));
+  }
+  box.innerHTML = h;
+  feed.appendChild(box);
+  while (feed.childNodes.length > 1500) feed.removeChild(feed.firstChild);
+  if ($('#autoscroll').checked)
+    window.scrollTo(0, document.body.scrollHeight);
+}
+
+function setStatus(on, text){
+  $('#dot').classList.toggle('on', on);
+  $('#statusText').textContent = text;
+}
+
+let kindFilter = null;
+function kindOn(k){
+  if (!kindFilter) return true;
+  return kindFilter.has(k);
+}
+
+function connect(){
+  if (state.es) { state.es.close(); state.es = null; }
+  if (!state.token) return;
+  const p = new URLSearchParams({ token: state.token });
+  const g = curGroup().replace(/\s/g,'');
+  if (g) p.set('groups', g);
+  if ($('#f_prompt').checked) p.set('include_prompt', '1');
+  const es = new EventSource('/live/events?' + p.toString());
+  state.es = es;
+  ['chat','gate','turn_start','prompt','model_round','tool_result',
+   'assistant_send','compact','notice','turn_end','meta'].forEach(k =>
+    es.addEventListener(k, e => {
+      try { const ev = JSON.parse(e.data); ev.kind = k;
+        if (kindOn(k)) addEvent(ev); } catch (err) {}
+    }));
+  es.onopen = () => setStatus(true, '已连接（等待事件…）');
+  es.onerror = () => {
+    setStatus(false, '断开，自动重连中…');
+    // EventSource 拿不到 HTTP 状态码：探一下 state 接口，区分 token 失效/
+    // 服务没开（8095 不通）/普通网络抖动，不再让页面永远只显示「重连中」
+    probeState().then(res => {
+      if (res.auth === false) {
+        state.es.close(); state.es = null;
+        state.token = ''; LS.set('token','');
+        showTokenMask(true);
+        setStatus(false, 'token 无效或已轮换');
+      } else if (res.auth === null) {
+        setStatus(false, '连不上实时服务（8095 未启动？）');
+      }
+    }).catch(() => {});
+  };
+}
+
+// ── token ─────────────────────────────────────────────────────
+if (state.token) $('#tokenMask').style.display = 'none';
+$('#tokenOk').onclick = () => {
+  state.token = $('#tokenInput').value.trim();
+  if (!state.token) return;
+  LS.set('token', state.token);
+  $('#tokenMask').style.display = 'none';
+  bootstrap();
+};
+$('#tokenInput').onkeydown = e => { if (e.key==='Enter') $('#tokenOk').click(); };
+
+// ── 群选择 / 弹幕机链接 ───────────────────────────────────────
+$('#saveGroup').onclick = () => {
+  const g = $('#groupSel').value;
+  LS.set('groups', g);
+  // 刷新进入当前群的调试页：群号写进 URL，分享/收藏都自带过滤
+  const p = new URLSearchParams(location.search);
+  if (g) p.set('groups', g); else p.delete('groups');
+  p.set('token', state.token);
+  location.replace('/live/debug?' + p.toString());
+};
+$('#openDanmaku').onclick = () => window.open(danmakuUrl(), '_blank');
+$('#copyDanmaku').onclick = async function () {
+  const url = location.origin + danmakuUrl();
+  const btn = this;
+  try {
+    await navigator.clipboard.writeText(url);
+  } catch (e) {
+    window.prompt('复制此链接（可贴 OBS 浏览器源）：', url);
+    return;
+  }
+  btn.textContent = '✅ 已复制';
+  setTimeout(() => btn.textContent = '复制弹幕链接', 1500);
+};
+$('#f_prompt').checked = LS.get('prompt','1') === '1';
+$('#f_prompt').onchange = e => { LS.set('prompt', e.target.checked?'1':'0'); connect(); };
+$('#autoscroll').checked = LS.get('autoscroll','1') === '1';
+$('#autoscroll').onchange = e => LS.set('autoscroll', e.target.checked?'1':'0');
+$('#pause').onclick = () => {
+  state.paused = !state.paused;
+  $('#pause').textContent = state.paused ? '▶ 继续' : '⏸ 暂停';
+  if (!state.paused) {
+    const p = state.pending.splice(0);
+    p.forEach(render);
+    if ($('#autoscroll').checked)
+      window.scrollTo(0, document.body.scrollHeight);
+  }
+};
+$('#clear').onclick = () => { $('#feed').innerHTML=''; state.events=[];
+  state.eventCount=0; $('#evtCount').textContent=''; };
+$('#export').onclick = () => {
+  const blob = new Blob([JSON.stringify(state.events, null, 2)],
+    { type:'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'deepseek-live-events.json';
+  a.click();
+};
+// 类型过滤（客户端；SSE 仍收全量，切换不重连）
+const allKinds = ['chat','gate','turn_start','prompt','model_round',
+  'tool_result','assistant_send','compact','notice','turn_end','meta'];
+const filterBox = document.createElement('span');
+filterBox.innerHTML = allKinds.map(k =>
+  `<label style="margin-right:6px"><input type="checkbox" data-k="${k}" checked> ${
+    KIND_CN[k]}</label>`).join('');
+$('#bar').appendChild(filterBox);
+function refreshFilter(){
+  const on = new Set([...document.querySelectorAll('input[data-k]')]
+    .filter(c=>c.checked).map(c=>c.dataset.k));
+  kindFilter = on.size === allKinds.length ? null : on;
+}
+document.querySelectorAll('input[data-k]').forEach(cb =>
+  cb.onchange = refreshFilter);
+document.querySelector('input[data-f=all]').onchange = e => {
+  document.querySelectorAll('input[data-k]').forEach(cb => cb.checked = e.target.checked);
+  refreshFilter();
+};
+
+bootstrap();
+</script>
+</body>
+</html>

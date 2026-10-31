@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>DeepSeek 群AI · MCP</title>
+<style>
+body{background:#1a1d23;color:#d7dae0;font:14px/1.6 "Microsoft YaHei",sans-serif;margin:0}
+nav{background:#22262e;padding:10px 20px;border-bottom:1px solid #333}
+nav a{color:#7aa2f7;margin-right:16px;text-decoration:none}
+.wrap{padding:20px;max-width:960px;margin:auto}
+table{border-collapse:collapse;width:100%;background:#22262e;margin-bottom:20px}
+th,td{padding:8px 10px;border-bottom:1px solid #2e333c;text-align:left;font-size:13px;vertical-align:top}
+input,select,textarea{background:#22262e;color:#eceff4;border:1px solid #3b4252;border-radius:4px;padding:6px 8px;box-sizing:border-box}
+input[type=text]{width:160px}textarea{width:100%;height:150px;font-family:Consolas,monospace}
+button{background:#3b4252;color:#eceff4;border:0;border-radius:4px;padding:5px 12px;cursor:pointer;margin-right:6px}
+button.primary{background:#5e81ac;color:#fff}
+.running{color:#9ece6c}.failed{color:#e06c75}.stopped{color:#8b93a7}
+.hint{color:#6b7280;font-size:12px}
+fieldset{border:1px solid #333;border-radius:6px;padding:12px 16px}
+</style>
+</head>
+<body>
+<nav>
+  <a href="/deepseek/dashboard?v={{ PLUGIN_VERSION }}">群开关</a>
+  <a href="/deepseek/settings?v={{ PLUGIN_VERSION }}">全局设置</a>
+  <a href="/deepseek/mcp?v={{ PLUGIN_VERSION }}">MCP 工具</a>
+  <a href="/deepseek/memory?v={{ PLUGIN_VERSION }}">群友记忆</a>
+  <a href="/deepseek/runs?v={{ PLUGIN_VERSION }}">后台/轮询</a>
+  <a href="/deepseek/prompts?v={{ PLUGIN_VERSION }}">提示词</a>
+  <span class="hint" style="float:right">v{{ PLUGIN_VERSION }}</span>
+</nav>
+<div class="wrap">
+<h2>MCP Servers</h2>
+<table><thead><tr><th>ID</th><th>名称</th><th>类型</th><th>启用</th><th>状态</th><th>缓存工具</th><th>操作</th></tr></thead>
+<tbody id="rows"></tbody></table>
+<div id="tools"></div>
+
+<fieldset><legend id="formTitle">新增 / 编辑（ID 仅字母数字-_）</legend>
+<label>ID <input type="text" id="f_id"></label>
+<label>名称 <input type="text" id="f_name"></label>
+<label>类型 <select id="f_kind"><option value="stdio">stdio</option><option value="http">http (Streamable)</option><option value="sse">sse</option></select></label>
+<label><input type="checkbox" id="f_enabled" checked> 启用</label>
+<p class="hint">stdio：{"command":"...","args":[...],"env":{},"cwd":""}<br>
+http/sse：{"url":"https://...","headers":{}}</p>
+<textarea id="f_config"></textarea>
+<p><button class="primary" onclick="save()">保存</button>
+<button onclick="test()">测试连接（短连接，不缓存工具）</button>
+<span id="tip" class="hint"></span></p>
+</fieldset>
+</div>
+<script>
+async function load(){
+  const r=await fetch('/deepseek/api/mcp').then(r=>r.json());
+  const tb=document.getElementById('rows');tb.innerHTML='';
+  for (const s of (r.servers||[])){
+    const tr=document.createElement('tr');
+    tr.innerHTML=`<td>${s.id}</td><td>${s.name||''}</td><td>${s.kind}</td>
+      <td>${s.enabled?'✅':'❌'}</td>
+      <td class="${s.status}">${s.status}${s.last_error?('：'+s.last_error.slice(0,80)):''}</td>
+      <td>${(s.tools||[]).length}</td><td></td>`;
+    const td=tr.lastElementChild;
+    const mk=(t,fn)=>{const b=document.createElement('button');b.textContent=t;b.onclick=fn;return b;};
+    td.append(mk('编辑',()=>fill(s)),
+      mk('重启',async()=>{const x=await fetch(`/deepseek/api/mcp/${s.id}/restart`,{method:'POST'}).then(r=>r.json());tip(x.ok?'已连接，工具 '+x.tools:x.error);load();}),
+      mk('工具',()=>showTools(s.id)),
+      mk('删除',async()=>{if(confirm('删除 '+s.id+'？')){await fetch(`/deepseek/api/mcp/${s.id}`,{method:'DELETE'});load();}}));
+    tb.appendChild(tr);
+  }
+}
+function tip(t){document.getElementById('tip').textContent=t;}
+function fill(s){
+  f_id.value=s.id;f_id.disabled=true;f_name.value=s.name||'';f_kind.value=s.kind;
+  f_enabled.checked=!!s.enabled;f_config.value=JSON.stringify(s.config,null,2);
+}
+async function save(){
+  let config;
+  try{config=JSON.parse(f_config.value||'{}');}catch(e){tip('config JSON 错误');return;}
+  const id=f_id.value.trim();
+  if(!/^[a-zA-Z0-9_-]+$/.test(id)){tip('ID 非法');return;}
+  const body={id,name:f_name.value,kind:f_kind.value,enabled:f_enabled.checked,config};
+  await fetch('/deepseek/api/mcp',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  f_id.disabled=false;load();tip('已保存');
+}
+async function test(){
+  const id=f_id.value.trim();
+  if(!id){tip('先保存再测试');return;}
+  tip('测试中（最多 30s）…');
+  const r=await fetch(`/deepseek/api/mcp/${id}/test`,{method:'POST'}).then(r=>r.json());
+  tip(r.ok?('连接成功，工具：'+(r.result.tools||[]).join(', ')):('失败：'+r.error));
+  load();
+}
+async function showTools(id){
+  const r=await fetch(`/deepseek/api/mcp/${id}/tools`).then(r=>r.json());
+  document.getElementById('tools').innerHTML='<h3>'+id+' 缓存工具</h3><pre style="white-space:pre-wrap">'+
+    (r.tools||[]).map(t=>'• '+t.function.name+' — '+(t.function.description||'')).join('\n')+'</pre>';
+}
+load();
+</script>
+</body></html>

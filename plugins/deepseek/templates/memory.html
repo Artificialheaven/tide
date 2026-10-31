@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>DeepSeek 群AI · 群友记忆</title>
+<style>
+body{background:#1a1d23;color:#d7dae0;font:14px/1.6 "Microsoft YaHei",sans-serif;margin:0}
+nav{background:#22262e;padding:10px 20px;border-bottom:1px solid #333}
+nav a{color:#7aa2f7;margin-right:16px;text-decoration:none}
+.wrap{padding:20px;max-width:960px;margin:auto}
+input{background:#22262e;color:#eceff4;border:1px solid #3b4252;border-radius:4px;padding:6px 8px}
+button{background:#3b4252;color:#eceff4;border:0;border-radius:4px;padding:5px 12px;cursor:pointer;margin-right:6px}
+button.danger{background:#7e3b3b}
+table{border-collapse:collapse;width:100%;background:#22262e}
+th,td{padding:8px 10px;border-bottom:1px solid #2e333c;text-align:left;font-size:13px;vertical-align:top}
+textarea{width:100%;background:#1a1d23;color:#d7dae0;border:1px solid #3b4252;border-radius:4px;box-sizing:border-box}
+.hint{color:#6b7280;font-size:12px}.sup{color:#e06c75}
+</style>
+</head>
+<body>
+<nav>
+  <a href="/deepseek/dashboard?v={{ PLUGIN_VERSION }}">群开关</a>
+  <a href="/deepseek/settings?v={{ PLUGIN_VERSION }}">全局设置</a>
+  <a href="/deepseek/mcp?v={{ PLUGIN_VERSION }}">MCP 工具</a>
+  <a href="/deepseek/memory?v={{ PLUGIN_VERSION }}">群友记忆</a>
+  <a href="/deepseek/runs?v={{ PLUGIN_VERSION }}">后台/轮询</a>
+  <a href="/deepseek/prompts?v={{ PLUGIN_VERSION }}">提示词</a>
+  <span class="hint" style="float:right">v{{ PLUGIN_VERSION }}</span>
+</nav>
+<div class="wrap">
+<h2>群友长期记忆 <span id="stats" class="hint"></span></h2>
+<p><input id="q" placeholder="QQ号 / 昵称搜索" style="width:260px">
+<button onclick="search()">搜索用户</button>
+<span id="uinfo" class="hint"></span>
+<button class="danger" id="forgetAll" style="display:none" onclick="forgetAll()">软删除该用户全部记忆</button></p>
+<table><thead><tr><th style="width:40%">事实</th><th>标签</th><th>重要度</th><th>来源群</th><th>状态</th><th>操作</th></tr></thead>
+<tbody id="rows"></tbody></table>
+
+<h2 style="margin-top:32px">她的自我记忆 <span class="hint">全局一份，跨所有群/私聊共享（「我」的经历、答应过的事、关系进展）</span></h2>
+<p><button onclick="loadSelf()">刷新</button>
+<label style="font-size:12px;color:#6b7280"><input type="checkbox" id="selfAll" onchange="loadSelf()"> 显示已作废</label>
+<span id="selfStats" class="hint"></span></p>
+<table><thead><tr><th style="width:46%">第一人称记忆</th><th>标签</th><th>重要度</th><th>来源群</th><th>状态</th><th>操作</th></tr></thead>
+<tbody id="selfRows"></tbody></table>
+</div>
+<script>
+let UID='';
+async function search(){
+  const q=document.getElementById('q').value.trim();
+  const r=await fetch('/deepseek/api/users?q='+encodeURIComponent(q)).then(r=>r.json());
+  const st=await fetch('/deepseek/api/memory/stats').then(r=>r.json());
+  document.getElementById('stats').textContent=
+    `共 ${st.stats.users} 个用户档案，${st.stats.active_memories} 条活跃记忆`
+    + `；自我记忆活跃 ${st.stats.active_self_memories||0} 条`;
+  const tb=document.getElementById('rows');tb.innerHTML='';
+  if(!r.users.length){document.getElementById('uinfo').textContent='无匹配用户';document.getElementById('forgetAll').style.display='none';return;}
+  const u=r.users[0];UID=u.user_id;
+  document.getElementById('uinfo').textContent=`${UID}，曾用名：${(u.names||[]).join(' / ')}`;
+  document.getElementById('forgetAll').style.display='inline';
+  const rm=await fetch(`/deepseek/api/users/${UID}/memories?all=1`).then(r=>r.json());
+  for (const m of (rm.memories||[])){
+    const tr=document.createElement('tr');
+    tr.innerHTML=`<td><textarea rows="2" id="t${m.id}">${m.text.replace(/</g,'&lt;')}</textarea></td>
+      <td><input id="g${m.id}" value="${(m.tags||'').replace(/"/g,'&quot;')}" style="width:80px"></td>
+      <td><input id="i${m.id}" type="number" step="0.1" min="0" max="1" value="${m.importance}" style="width:64px"></td>
+      <td>${m.source_group_id||''}</td>
+      <td class="${m.superseded?'sup':''}">${m.superseded?'已软删':'活跃'}</td><td></td>`;
+    const td=tr.lastElementChild;
+    const save=document.createElement('button');save.textContent='保存';
+    save.onclick=async()=>{
+      await fetch(`/deepseek/api/memories/${m.id}`,{method:'PUT',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({text:document.getElementById('t'+m.id).value,
+          tags:document.getElementById('g'+m.id).value,
+          importance:Number(document.getElementById('i'+m.id).value)})});
+      search();
+    };
+    const toggle=document.createElement('button');
+    toggle.textContent=m.superseded?'恢复':'软删';
+    toggle.onclick=async()=>{await fetch(`/deepseek/api/memories/${m.id}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({superseded:!m.superseded})});search();};
+    const del=document.createElement('button');del.textContent='彻底删除';del.className='danger';
+    del.onclick=async()=>{if(confirm('彻底删除该条？')){await fetch(`/deepseek/api/memories/${m.id}`,{method:'DELETE'});search();}};
+    td.append(save,toggle,del);
+    tb.appendChild(tr);
+  }
+}
+async function forgetAll(){
+  if(!confirm(`软删除 ${UID} 的全部记忆？`))return;
+  await fetch(`/deepseek/api/users/${UID}/memories`,{method:'DELETE'});
+  search();
+}
+async function loadSelf(){
+  const all=document.getElementById('selfAll').checked?'1':'';
+  const r=await fetch('/deepseek/api/self-memories?all='+all).then(r=>r.json());
+  const ms=r.memories||[];
+  document.getElementById('selfStats').textContent=
+    `活跃 ${r.stats?r.stats.active_self_memories:0} 条 / 共 ${r.stats?r.stats.total_self_memories:0} 条`;
+  const tb=document.getElementById('selfRows');tb.innerHTML='';
+  if(!ms.length){tb.innerHTML='<tr><td colspan="6" class="hint">暂无自我记忆。</td></tr>';return;}
+  for (const m of ms){
+    const tr=document.createElement('tr');
+    tr.innerHTML=`<td><textarea rows="2" id="st${m.id}">${m.text.replace(/</g,'&lt;')}</textarea></td>
+      <td><input id="sg${m.id}" value="${(m.tags||'').replace(/"/g,'&quot;')}" style="width:80px"></td>
+      <td><input id="si${m.id}" type="number" step="0.1" min="0" max="1" value="${m.importance}" style="width:64px"></td>
+      <td>${m.created_by_group||''}</td>
+      <td class="${m.superseded?'sup':''}">${m.superseded?'已作废':'活跃'}<br><span class="hint">回忆链 ${m.trace_count||0}</span></td><td></td>`;
+    const td=tr.lastElementChild;
+    const trail=document.createElement('button');trail.textContent='回忆链';
+    trail.onclick=()=>toggleTrails(m.id,tr);
+    const save=document.createElement('button');save.textContent='保存';
+    save.onclick=async()=>{
+      await fetch(`/deepseek/api/self-memories/${m.id}`,{method:'PUT',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({text:document.getElementById('st'+m.id).value,
+          tags:document.getElementById('sg'+m.id).value,
+          importance:Number(document.getElementById('si'+m.id).value)})});
+      loadSelf();
+    };
+    const toggle=document.createElement('button');
+    toggle.textContent=m.superseded?'恢复':'作废';
+    toggle.onclick=async()=>{await fetch(`/deepseek/api/self-memories/${m.id}`,
+      {method:'PUT',headers:{'Content-Type':'application/json'},
+       body:JSON.stringify({superseded:!m.superseded})});loadSelf();};
+    const del=document.createElement('button');del.textContent='彻底删除';del.className='danger';
+    del.onclick=async()=>{if(confirm('彻底删除该条自我记忆？')){
+      await fetch(`/deepseek/api/self-memories/${m.id}`,{method:'DELETE'});loadSelf();}};
+    td.append(trail,save,toggle,del);
+    tb.appendChild(tr);
+  }
+}
+const TR_KIND={'recall':'召回','revise':'改写','supersede':'作废','web_edit':'网页改'};
+const TR_SRC={'human':'前台','work':'后台苏醒','talk':'主动搭话','greet':'入群','extract':'抽取','tool':'工具'};
+function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+function fmtTime(ts){if(!ts)return '';const d=new Date(ts*1000);
+  return `${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;}
+async function toggleTrails(id,tr){
+  const next=tr.nextElementSibling;
+  if(next&&next.classList.contains('trail-row')){next.remove();return;}
+  const r=await fetch(`/deepseek/api/self-memories/${id}/traces?limit=30`).then(r=>r.json());
+  const panel=document.createElement('tr');panel.className='trail-row';
+  panel.innerHTML='<td colspan="6" style="background:#1a1d23"></td>';
+  const box=panel.firstElementChild;
+  const ts=(r.traces||[]);
+  if(!ts.length){box.innerHTML='<span class="hint">还没有回忆链记录（开启 self_memory_trace_on 后，召回/改写会自动留痕）。</span>';}
+  else{
+    box.innerHTML='<div class="hint" style="margin-bottom:6px">回忆链只读，只给主人看，不会进她的上下文。最近 '+ts.length+' 条（倒序）：</div>';
+    for(const t of ts){
+      const mood=t.mood_tag?` · 心情 ${esc(t.mood_tag)}${t.mood_level?'/'+t.mood_level:''}`:'';
+      const score=t.kind==='recall'?` · 命中分 ${Number(t.match_score).toFixed(2)}`:'';
+      const ctx=t.context?`<div class="hint">触发语：${esc(t.context)}</div>`:'';
+      const rev=t.revision?`<div class="hint" style="color:#d19a66">${esc(t.revision)}</div>`:'';
+      const who=document.createElement('div');
+      who.style.cssText='border-left:2px solid #3b4252;padding:4px 8px;margin-bottom:6px';
+      who.innerHTML=`<b>${fmtTime(t.created_at)}</b> ${TR_KIND[t.kind]||t.kind} · ${TR_SRC[t.source]||t.source||'—'}${t.group_id?' · 群 '+esc(t.group_id):''}${mood}${score}${ctx}${rev}`;
+      box.appendChild(who);
+    }
+  }
+  tr.after(panel);
+}
+loadSelf();
+</script>
+</body></html>

@@ -1,0 +1,47 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# ---- 虚拟环境 ----
+.venv/
+venv/
+env/
+ENV/
+
+# ---- IDE ----
+.idea/
+.vscode/
+
+# ---- 本地配置（可能含 API Key / token，禁止入库）----
+/config.json
+plugins/*/config.json
+
+# ---- 运行期数据库 ----
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+plugins/*/db/
+
+# ---- 插件本地依赖（pip --target 安装）与生成的路径文件 ----
+plugins/*/lib/
+plugins/*/*.pth
+
+# ---- 插件运行期工作区（AI 操作用户文件/图片，启动时自动建目录）----
+plugins/*/workspace/
+
+# ---- 插件打包产物 ----
+plugins/*/*.zip
+
+# ---- 临时/备份文件 ----
+tempfile_*.py
+*.bak
+*.tmp
+temp/
+tmp/
+
+# ---- 系统文件 ----
+.DS_Store
+Thumbs.db

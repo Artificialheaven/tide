@@ -1,0 +1,425 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>DeepSeek 群AI · 全局设置</title>
+<style>
+body{background:#1a1d23;color:#d7dae0;font:14px/1.6 "Microsoft YaHei",sans-serif;margin:0}
+nav{background:#22262e;padding:10px 20px;border-bottom:1px solid #333}
+nav a{color:#7aa2f7;margin-right:16px;text-decoration:none}
+.wrap{padding:20px;max-width:820px;margin:auto}
+fieldset{border:1px solid #333;border-radius:6px;margin-bottom:16px;padding:12px 16px}
+legend{color:#8b93a7;padding:0 6px}
+label{display:block;margin:8px 0}
+input[type=text],input[type=number],input[type=password],select,textarea{
+  background:#22262e;color:#eceff4;border:1px solid #3b4252;border-radius:4px;
+  padding:6px 8px;width:320px;box-sizing:border-box}
+textarea{width:100%;height:120px}
+input[type=checkbox]{width:auto;margin-right:6px}
+button{background:#5e81ac;color:#fff;border:0;border-radius:4px;padding:8px 22px;cursor:pointer}
+.hint{color:#6b7280;font-size:12px}
+</style>
+</head>
+<body>
+<nav>
+  <a href="/deepseek/dashboard?v={{ PLUGIN_VERSION }}">群开关</a>
+  <a href="/deepseek/settings?v={{ PLUGIN_VERSION }}">全局设置</a>
+  <a href="/deepseek/mcp?v={{ PLUGIN_VERSION }}">MCP 工具</a>
+  <a href="/deepseek/memory?v={{ PLUGIN_VERSION }}">群友记忆</a>
+  <a href="/deepseek/runs?v={{ PLUGIN_VERSION }}">后台/轮询</a>
+  <a href="/deepseek/prompts?v={{ PLUGIN_VERSION }}">提示词</a>
+  <span class="hint" style="float:right">v{{ PLUGIN_VERSION }}</span>
+</nav>
+<div class="wrap">
+<h2>全局设置</h2>
+<form id="f">
+<fieldset><legend>账号 / 模型</legend>
+  <label>主人QQ <input type="number" name="owner_qq"></label>
+  <div style="margin:8px 0">
+    <strong>模型服务商</strong>
+    <span class="hint">每个服务商共享一个 API 地址和 Key，可挂多个模型；default 服务商的 Key 留空时读环境变量 DEEPSEEK_API_KEY。密钥保存后不回显，留空表示不修改。</span>
+    <div id="providerCards" style="margin:6px 0"></div>
+    <button type="button" id="btnAddProvider">+ 添加服务商</button>
+  </div>
+  <div style="margin:8px 0">
+    <strong>模型路由</strong>
+    <span class="hint">主对话模型可在各群设置里单独覆盖；判官类后台任务全局共用此处选择。</span>
+    <div id="routeBox" style="margin:6px 0"></div>
+  </div>
+  <label><input type="checkbox" name="enable_thinking">默认开启深度思考（判官/摘要/记忆抽取/心情/风格恒关）</label>
+  <label>指令前缀 <input type="text" name="command_prefix"></label>
+  <label>全局称呼词（逗号分隔）<input type="text" name="aliases"></label>
+</fieldset>
+<fieldset><legend>默认人设</legend>
+  <textarea name="default_persona" placeholder="留空使用内置极简人设。每群可在群设置里覆盖。"></textarea>
+</fieldset>
+<fieldset><legend>上下文 / 触发</legend>
+  <label>滑窗轮数 <input type="number" name="window_rounds"></label>
+  <label>滑窗字符预算 <input type="number" name="char_budget"></label>
+  <label>摘要字符预算 <input type="number" name="summary_char_budget"></label>
+  <label><input type="checkbox" name="ambient_context_on">触发前背景消息（把触发前几条未触发群聊注入上下文）</label>
+  <label>背景消息条数 <input type="number" name="ambient_context_n" min="1" max="30"></label>
+  <label><input type="checkbox" name="heuristic_on">启发式粗筛</label>
+  <label><input type="checkbox" name="judge_on">AI 判官过滤</label>
+  <label><input type="checkbox" name="judge_fail_open">判官失败时放行（默认关=失败不回）</label>
+  <label><input type="checkbox" name="join_greet_on">被邀请入群时通知 AI 主动打招呼（入群侦查）</label>
+  <label>判官参考历史条数 <input type="number" name="judge_history"></label>
+  <label>最大回复 token <input type="number" name="max_tokens"></label>
+  <label>前台工具循环上限 <input type="number" name="max_tool_rounds"></label>
+  <label>后台工具循环上限（定时苏醒等无人值守触发） <input type="number" name="background_max_tool_rounds"></label>
+</fieldset>
+<fieldset><legend>超时 / 沙箱</legend>
+  <label>请求超时(s) <input type="number" name="request_timeout"></label>
+  <label>内置工具超时(s) <input type="number" name="tool_timeout"></label>
+  <label>MCP 超时(s) <input type="number" name="mcp_timeout"></label>
+  <label>单文件上限 KiB <input type="number" name="max_file_size_kb"></label>
+  <label>每群工作区 MiB <input type="number" name="workspace_quota_mb"></label>
+  <label>工具结果截断字符 <input type="number" name="tool_result_max_chars"></label>
+  <label>MCP 媒体保留小时 <input type="number" name="mcp_media_ttl_hours" min="0" title="截图/录音在群工作区的存活时长，0=永久"></label>
+  <label>MCP 媒体单文件上限 KiB <input type="number" name="mcp_media_max_kb" title="截图/录音落盘及发送/读图的源文件上限，独立于群配额；默认15360=15MiB"></label>
+  <label>发图压缩上限 KiB <input type="number" name="send_image_max_kb" title="qq_send_image 出站图片超过此体积自动转 JPEG 压缩（不删原图）；默认3072=3MiB"></label>
+  <label>fs_read 源文件上限 KiB <input type="number" name="read_file_max_kb" title="读取文本/办公文档的源文件字节上限；默认4096=4MiB"></label>
+  <label>fs_read 抽取字符预算 <input type="number" name="read_file_max_chars" title="办公文档全文抽取的最大字符数"></label>
+  <label>fs_read 单页字符上限 <input type="number" name="read_page_max_chars" title="一次分页返回的硬上限"></label>
+  <label>代码执行超时(s) <input type="number" name="code_run_timeout" title="code_run_python/shell 的子进程超时，仅主人可触发；5-120"></label>
+</fieldset>
+<fieldset><legend>定时苏醒（防假死，每隔一段时间按概率让 AI 主动看看群）</legend>
+  <label><input type="checkbox" name="wake_on">开启定时苏醒（每群可在群设置单独覆盖）</label>
+  <label>轮询间隔（分钟） <input type="number" name="wake_check_minutes"></label>
+  <label>每次基础唤醒概率（百分数 0-100） <input type="number" name="wake_prob_percent" min="0" max="100"></label>
+  <label>保底：连续 N 次未触发必唤醒 1 次（0=关保底） <input type="number" name="wake_every_n"></label>
+  <label>最近 N 小时无真人消息则不唤醒（0=不限） <input type="number" name="wake_active_hours"></label>
+  <label>分时段概率 JSON（留空=全天用基础概率；跨午夜直接写 start&gt;end）
+    <input type="text" name="wake_schedule" style="width:100%"
+      placeholder='[{"start":"23:00","end":"08:00","percent":2},{"start":"08:00","end":"23:00","percent":12}]'></label>
+  <label>每群 AI 自建轮询条数上限 <input type="number" name="polls_max_per_group"
+    title="AI 在群里用 poll_add 自建多条轮询（各带任务/概率/保底/活跃门/分时段）；群里有自建轮询后不再走上面的全局配置"></label>
+  <span class="hint">AI 自建的轮询列表在「后台/轮询」页查看；没有自建轮询的群仍用上面的全局配置。</span>
+</fieldset>
+<fieldset><legend>主动搭话（她自己想说话：在定时苏醒同一次 tick 上先掷搭话骰，没中再走苏醒）</legend>
+  <label><input type="checkbox" name="speakup_on">开启主动搭话（每群可在群设置单独覆盖）</label>
+  <label>峰时基础概率%（工作日 9-12、14-18） <input type="number" name="speakup_peak_percent" min="0" max="100"></label>
+  <label>谷时基础概率%（其余时段含周末） <input type="number" name="speakup_valley_percent" min="0" max="100"></label>
+  <label>刚聊过的分钟数内降概率（防黏人） <input type="number" name="speakup_recent_minutes" min="0"></label>
+  <label>冷场多少小时后升概率 <input type="number" name="speakup_cold_hours" min="0"></label>
+  <label>她自己发言后的冷却分钟数 <input type="number" name="speakup_self_cooldown_minutes" min="0"></label>
+  <label>每连空一次加多少概率 <input type="number" name="speakup_miss_bonus" min="0" max="100"></label>
+  <label>连空加成上限 <input type="number" name="speakup_miss_cap" min="0" max="100"></label>
+  <label>安静时段（不主动搭话；格式 HH:MM-HH:MM，可跨午夜，留空=全天）
+    <input type="text" name="speakup_quiet" style="width:160px" placeholder="01:00-08:00"></label>
+  <span class="hint">命中后以「你自己心里冒出来的念头」口吻起话头；没必要说会输出 [静默]。共用上面的活跃门（冷群不打扰），与定时苏醒每 tick 至多触发一次，任一触发都清零计数。</span>
+</fieldset>
+<fieldset><legend>执行中打断（任务跑工具时，群友发 /ai 打断 &lt;指示&gt; 可临时调整）</legend>
+  <label><input type="checkbox" name="interrupt_on">允许执行中打断（每群可在群设置单独覆盖）</label>
+  <label>终态后插队消息的同轮宽限波次 <input type="number" name="interrupt_grace_rounds"
+    title="任务刚收尾时到达的打断，最多在同一轮内再处理几波；0=只落入历史等下一轮"></label>
+</fieldset>
+<fieldset><legend>长跑模式（主人 /ai 循环 &lt;任务&gt; 授权后，AI 无轮数上限连续工作直到收尾）</legend>
+  <label><input type="checkbox" name="loop_on">开启长跑模式（每群可在群设置单独覆盖）</label>
+  <label>每多少个工具轮必须在群里汇报一次进展 <input type="number" name="loop_every_rounds" min="1"></label>
+  <label>模型上下文上限（token；0=自动，从模型超长报错中学习，学到前按字符阈值兜底） <input type="number" name="loop_context_limit_tokens" min="0" step="1000" style="width:110px"></label>
+  <label>用到输入预算的百分之多少就提前压缩（给回复输出预留余量） <input type="number" name="loop_compact_percent" min="20" max="95" style="width:80px"></label>
+  <label>兜底压缩阈值（约字符；未知模型 token 上限时生效） <input type="number" name="loop_compact_threshold_chars" min="4000" step="1000"></label>
+  <label>压缩时尾部保留的工具轮数 <input type="number" name="loop_keep_rounds" min="1"></label>
+  <label>连续多少轮无工具操作则自动结束（空转保护） <input type="number" name="loop_idle_turn_limit" min="1"></label>
+  <span class="hint">长跑时优先按模型真实 token 用量（每次请求返回的 prompt_tokens）估算水位，快到上限时自动把前面的过程压成滚动纪要、纪要跨续跑轮保留；撞上限报错也会强制压缩后重试。AI 也可用 loop_request 工具申请长跑，私聊请示主人后由主人「/ai 循环 同意 &lt;编号&gt;」批准；结束时结果私聊汇报主人。插件重启会中断未结束的长跑。</span>
+</fieldset>
+<fieldset><legend>外部触发 / 监测程序（外部脚本 POST 事件 → AI 后台轮；AI 可用 watcher_start 托管监测进程）</legend>
+  <label><input type="checkbox" name="trigger_on">开启触发 HTTP 服务</label>
+  <label>监听地址 <input type="text" name="trigger_host" style="width:160px" title="默认 127.0.0.1 仅本机；需要别的机器回调才改 0.0.0.0"></label>
+  <label>监听端口 <input type="number" name="trigger_port"></label>
+  <label>同源事件冷却秒数 <input type="number" name="trigger_cooldown_seconds"></label>
+  <label>单次事件文本上限 <input type="number" name="trigger_text_max_chars"></label>
+  <label>每群存活监测进程上限 <input type="number" name="watchers_max_per_group"></label>
+  <label>回调 token（监测程序请求头 Authorization: Bearer &lt;token&gt;；改 host/port 需重启生效）
+    <input type="text" id="triggerToken" readonly style="width:380px;font-family:monospace"></label>
+  <button type="button" id="btnRegenToken">重新生成 token</button>
+  <span class="hint" id="triggerUrl"></span>
+</fieldset>
+<fieldset><legend>实时订阅 / 弹幕机（SSE 只读流 + 浏览器观察页；复用上面的触发 token）</legend>
+  <label><input type="checkbox" name="live_on">开启实时订阅服务（改开关/地址/端口需重连生效）</label>
+  <label>监听地址 <input type="text" name="live_host" style="width:160px" title="默认 127.0.0.1 仅本机；OBS 在别的机器上才改 0.0.0.0"></label>
+  <label>监听端口 <input type="number" name="live_port"></label>
+  <span class="hint" id="liveStatus"></span>
+  <div style="margin-top:6px">
+    <a id="liveDanmaku" href="#" target="_blank" rel="noopener">🎬 弹幕机页面</a> ｜
+    <a id="liveDebug" href="#" target="_blank" rel="noopener">🛠 实时调试台</a>
+  </div>
+  <span class="hint">弹幕机可做 OBS 浏览器源（URL 加 &amp;bg=transparent 为全屏透明叠加）；调试台展示完整思考链/工具 IO/本轮 prompt。
+    页面打开后输入上面的触发 token。⚠️ 改成 0.0.0.0 后，局域网内任何持 token 的人都能实时读取全部群聊与思考链。</span>
+</fieldset>
+<fieldset><legend>AI 自定义工具（AI 写 Python 工具，dry-run 通过后主人发布；代码只在隔离子进程执行）</legend>
+  <label>每群/全局工具数上限 <input type="number" name="custom_tools_max_per_scope"></label>
+  <label>单个工具代码字符上限 <input type="number" name="custom_tool_code_max_chars"></label>
+  <label>工具调用超时(s) <input type="number" name="custom_tool_call_timeout"></label>
+  <label>dry-run 试跑超时(s) <input type="number" name="custom_validate_timeout"></label>
+</fieldset>
+<fieldset><legend>分条发送（模拟真人）</legend>
+  <label><input type="checkbox" name="split_reply">开启按句分条</label>
+  <label><input type="checkbox" name="real_at_on">真艾特：回复里的 @昵称 发送时转成真正的 QQ 艾特段</label>
+  <label>单条最大字数 <input type="number" name="split_max_len"></label>
+  <label>短句合并下限 <input type="number" name="split_min_len"></label>
+  <label>条间延迟下限 ms <input type="number" name="split_delay_min_ms"></label>
+  <label>条间延迟上限 ms <input type="number" name="split_delay_max_ms"></label>
+</fieldset>
+<fieldset><legend>群友长期记忆</legend>
+  <label><input type="checkbox" name="memory_on">开启 per-user 记忆</label>
+  <label>每 N 轮回复抽取一次（0=仅手动/工具记忆）<input type="number" name="memory_extract_every"></label>
+  <label>每轮注入条数上限 <input type="number" name="memory_recall_topk"></label>
+  <label>注入字符预算 <input type="number" name="memory_recall_budget"></label>
+  <label>单次抽取回看消息数 <input type="number" name="memory_extract_max_msgs"></label>
+</fieldset>
+<fieldset><legend>她自己的第一人称记忆（全局一份，跨所有群/私聊共享）</legend>
+  <label><input type="checkbox" name="self_memory_on">开启自我记忆（每群可在群设置单独覆盖）</label>
+  <label>每天新建条目上限（就地改写不耗配额） <input type="number" name="self_memory_daily_quota" min="0"></label>
+  <label>每轮召回条数上限 <input type="number" name="self_memory_recall_topk"></label>
+  <label>召回字符预算 <input type="number" name="self_memory_recall_budget"></label>
+  <label><input type="checkbox" name="self_memory_trace_on">记录回忆链（何时/哪个群/什么心情下想起或改过，记忆页只读查看）</label>
+  <span class="hint">记的是「我」的经历、亲口答应的事、和群友关系的进展；随记忆抽取同一次便宜模型调用产出，不另花钱。在「记忆」页查看/编辑。</span>
+</fieldset>
+<fieldset><legend>好友申请 / 群邀请审批</legend>
+  <label><input type="checkbox" name="request_notify_on">收到申请私聊通知主人（AI 只暂存不自主拍板，由主人对话同意/拒绝）</label>
+  <span class="hint">好友申请、别人拉机器人进群的邀请会暂存并私聊通知你；回复「同意/拒绝 申请#编号」即可，AI 用主人专属工具执行。加群申请（别人申请入群）一律忽略。</span>
+</fieldset>
+<fieldset><legend>心情（每群一份：心情值 + 七绪，判完只对下一轮说一次）</legend>
+  <label><input type="checkbox" name="mood_on">开启心情（每群可在群设置单独覆盖）</label>
+  <label>心情基线（0-100，波动按半衰期向它回落） <input type="number" name="mood_baseline" min="0" max="100"></label>
+  <label>最小变化幅度（低于此值只记账不说） <input type="number" name="mood_delta_threshold" min="0" max="20"></label>
+  <label>最低判定信心（0-100） <input type="number" name="mood_min_confidence" min="0" max="100"></label>
+  <label>每群每天最多注入几次 <input type="number" name="mood_daily_cap" min="0"></label>
+  <label>每群心情时间线保留条数 <input type="number" name="mood_timeline_keep" min="10"></label>
+  <span class="hint">每轮回复后一次便宜模型判定（约 3 小时半衰期回落）；心情背景只注入下一轮且不重复。在群设置页查看当前值/时间线/重置。</span>
+</fieldset>
+<fieldset><legend>群体说话风格学习</legend>
+  <label><input type="checkbox" name="learn_style_on">开启（已开启群全量语料 0 token 落库，每群可在群设置覆盖）</label>
+  <label>每攒 N 条新语料重建一次画像 <input type="number" name="style_rebuild_every"></label>
+  <label>单次学习采样条数 <input type="number" name="style_sample_msgs"></label>
+  <label>每群原始语料滚动保留条数 <input type="number" name="raw_corpus_cap"></label>
+</fieldset>
+<fieldset><legend>约定 / 待办 / 主动提醒</legend>
+  <label><input type="checkbox" name="reminder_on">到点主动在群里 @ 提醒（每群可覆盖）</label>
+  <label>提醒轮询秒数 <input type="number" name="reminder_check_seconds"></label>
+</fieldset>
+<fieldset><legend>AI 定时任务</legend>
+  <label><input type="checkbox" name="scheduler_on">开启定时任务（群友可让 AI 登记，到点自动写消息发群/私聊；每群可覆盖）</label>
+  <label>调度轮询秒数 <input type="number" name="scheduler_check_seconds"></label>
+  <label>后台运行记录保留条数（Web「后台任务」页可查看苏醒/定时任务的工作流） <input type="number" name="bg_runs_keep"></label>
+</fieldset>
+<fieldset><legend>入站多模态（图片 / 文件 / 语音）</legend>
+  <label><input type="checkbox" name="vision_on">用户发的图片直传视觉模型（每群可覆盖）</label>
+  <label>单条消息最多送图张数 <input type="number" name="vision_max_images"></label>
+  <label><input type="checkbox" name="file_parse_on">附件解析为文本（txt/代码/pdf/docx；每群可覆盖）</label>
+  <label>附件文本注入字符上限 <input type="number" name="file_text_max_chars"></label>
+  <label>read_image 回看截图单图上限 KiB <input type="number" name="read_image_max_kb"></label>
+  <label>媒体下载总量上限 KiB <input type="number" name="media_download_max_kb"></label>
+  <label><input type="checkbox" name="voice_asr_on">语音转文字（需兼容 OpenAI 音频接口的 ASR 服务，且 silk 语音可能要本机装 ffmpeg；每群可覆盖）</label>
+  <label>ASR 模型名 <input type="text" name="voice_asr_model" placeholder="如 whisper-1，留空=不转写"></label>
+</fieldset>
+<fieldset><legend>截图坐标辅助（click_at）</legend>
+  <label><input type="checkbox" name="vision_grid_on">read_image 默认给截图叠加坐标网格</label>
+  <label>网格间距（原图像素） <input type="number" name="vision_grid_step"></label>
+</fieldset>
+<fieldset><legend>PDF/Word 渲染看图（view_document）</legend>
+  <label><input type="checkbox" name="doc_render_on">扫描版 PDF / 老 .doc 抽不出文字时自动渲染成图送视觉（每群可覆盖）</label>
+  <label>单次渲染页数上限 <input type="number" name="doc_render_max_pages"></label>
+  <label>页面渲染 DPI <input type="number" name="doc_render_dpi"></label>
+  <label>被渲染文档源文件上限 KiB <input type="number" name="doc_render_max_kb"></label>
+</fieldset>
+<fieldset><legend>私聊 + QQ 文件</legend>
+  <label><input type="checkbox" name="private_on">开启私聊对话（默认只接主人和白名单）</label>
+  <label>允许私聊的 QQ（逗号分隔，主人恒允许） <input type="text" name="private_allowed_qqs" style="width:220px"></label>
+  <label>qq_download_file 单文件下载上限 KiB <input type="number" name="qq_file_max_kb"></label>
+  <label><input type="checkbox" name="risky_owner_only">风险操作（写/删工作区与 public 文件、fs_publish、MCP 远程桌面）只有主人能指令</label>
+</fieldset>
+<fieldset><legend>public 公共素材库 + 自我提示词注入</legend>
+  <label><input type="checkbox" name="public_writable_on">允许把素材/笔记写入跨群共享的 public/（写删仍只有主人能指令）</label>
+  <label>public 单文件上限 KiB <input type="number" name="public_max_file_kb"></label>
+  <label>public 总配额 MiB <input type="number" name="public_quota_mb"></label>
+  <label><input type="checkbox" name="inject_on">开启 AI 自我提示词注入表（学到技能/沉淀素材后自动每轮提醒自己）</label>
+  <label>每轮注入字符预算 <input type="number" name="inject_max_chars"></label>
+  <label>每群/全局注入条目上限 <input type="number" name="inject_max_per_scope"></label>
+</fieldset>
+<button type="submit">保存（热加载）</button>
+<span class="hint" id="tip"></span>
+</form>
+</div>
+<script>
+const ROUTE_KEYS = [
+  ['model','对话模型'],['judge_model','判官模型'],['summary_model','摘要模型'],
+  ['extract_model','记忆抽取模型'],['mood_model','心情模型'],['style_model','风格模型']
+];
+let PROVIDERS = [];
+let SETTINGS = null;
+
+function esc(s){return String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+
+function routeOptions(sel){
+  let html = '<option value="">（未选择）</option>';
+  for (const p of PROVIDERS) {
+    html += `<optgroup label="${esc(p.label||p.id)}">`;
+    for (const m of (p.models||[])) {
+      const v = `${p.id}/${m.id}`;
+      html += `<option value="${esc(v)}">${esc(m.label||m.id)}</option>`;
+    }
+    html += '</optgroup>';
+  }
+  return html;
+}
+
+function renderRoutes(){
+  const box = document.getElementById('routeBox');
+  box.innerHTML = ROUTE_KEYS.map(([k,label])=>
+    `<label style="display:block">${label} <select name="${k}">${routeOptions()}</select></label>`
+  ).join('');
+  if (SETTINGS) for (const [k] of ROUTE_KEYS) {
+    const el = box.querySelector(`[name=${k}]`);
+    if (SETTINGS[k]) el.value = SETTINGS[k];
+  }
+}
+
+function providerCard(p={}){
+  const div = document.createElement('div');
+  div.className = 'pcard';
+  div.style.cssText = 'border:1px solid #3b4252;border-radius:6px;padding:8px 10px;margin:6px 0;background:#20242c';
+  const keyPh = p.key_set ? `已配置：${p.key_hint||'********'}（留空不修改）`
+              : (p.id==='default' ? '未配置；留空读环境变量 DEEPSEEK_API_KEY' : '未配置（必填）');
+  div.innerHTML = `
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+      <label style="margin:0">显示名 <input class="p-label" type="text" style="width:150px" value="${esc(p.label||'')}" placeholder="如 火山方舟"></label>
+      <label style="margin:0">ID <input class="p-id" type="text" style="width:130px" value="${esc(p.id||'')}" placeholder="如 glm（小写字母数字）"></label>
+      <button type="button" class="p-del" style="background:#a33;padding:4px 10px">删服务商</button>
+    </div>
+    <label style="display:block;margin:6px 0 0">API 地址 <input class="p-base" type="text" style="width:420px" value="${esc(p.base_url||'')}" placeholder="https://api.example.com/v1"></label>
+    <label style="display:block;margin:4px 0 0">API Key <input class="p-key" type="password" style="width:420px" autocomplete="new-password" placeholder="${esc(keyPh)}"></label>
+    <div class="p-models" style="margin:6px 0"></div>
+    <button type="button" class="m-add">+ 加模型</button>`;
+  const mbox = div.querySelector('.p-models');
+  const addModel = (m={})=>{
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;gap:6px;margin:3px 0;align-items:center';
+    row.innerHTML = `<input class="m-id" type="text" style="width:260px" placeholder="模型 ID（服务端要求的名字）" value="${esc(m.id||'')}">
+      <input class="m-label" type="text" style="width:160px" placeholder="显示名（可选）" value="${esc(m.label||'')}">
+      <button type="button" class="m-del" style="background:#a33;padding:3px 8px">删</button>`;
+    row.querySelector('.m-del').onclick = ()=>row.remove();
+    mbox.appendChild(row);
+  };
+  (p.models||[]).forEach(addModel);
+  div.querySelector('.m-add').onclick = ()=>addModel();
+  div.querySelector('.p-del').onclick = ()=>{
+    if (confirm('删除这个服务商？被模型路由引用时后端会拒绝保存。')) div.remove();
+  };
+  return div;
+}
+
+function renderProviders(){
+  const box = document.getElementById('providerCards');
+  box.innerHTML = '';
+  PROVIDERS.forEach(p=>box.appendChild(providerCard(p)));
+}
+
+function collectProviders(){
+  return [...document.querySelectorAll('#providerCards .pcard')].map(card=>{
+    const models = [...card.querySelectorAll('.p-models > div')].map(r=>({
+      id: r.querySelector('.m-id').value.trim(),
+      label: r.querySelector('.m-label').value.trim()
+    })).filter(m=>m.id);
+    return {
+      id: card.querySelector('.p-id').value.trim(),
+      label: card.querySelector('.p-label').value.trim(),
+      base_url: card.querySelector('.p-base').value.trim(),
+      api_key: card.querySelector('.p-key').value,
+      models
+    };
+  }).filter(p=>p.label||p.id||p.base_url||p.models.length);
+}
+
+async function load(){
+  const [pr, sr] = await Promise.all([
+    fetch('/deepseek/api/llm-providers').then(r=>r.json()),
+    fetch('/deepseek/api/settings').then(r=>r.json())
+  ]);
+  PROVIDERS = pr.providers || [];
+  SETTINGS = sr.settings || {};
+  renderProviders();
+  renderRoutes();
+  for (const [k,v] of Object.entries(SETTINGS)) {
+    if (v !== null && !['string','number','boolean'].includes(typeof v)) continue;
+    const el = document.querySelector(`[name=${k}]`);
+    if (!el) continue;
+    if (el.type==='checkbox') el.checked = !!v;
+    else el.value = v;
+  }
+}
+document.getElementById('btnAddProvider').onclick = ()=>{
+  document.getElementById('providerCards').appendChild(providerCard({}));
+};
+document.getElementById('f').onsubmit = async e=>{
+  e.preventDefault();
+  const providers = collectProviders();
+  const tip = document.getElementById('tip');
+  // 先记下当前路由选择（服务商保存会规范化 id 并重建 select）
+  const routeVals = {};
+  for (const [k] of ROUTE_KEYS) {
+    const el = document.querySelector(`[name=${k}]`);
+    routeVals[k] = el ? el.value : '';
+  }
+  // 先存服务商（保存后 id/模型会被规范化，用返回值重渲染）
+  const pres = await fetch('/deepseek/api/llm-providers',{
+    method:'PUT',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({providers})
+  }).then(r=>r.json());
+  if (!pres.ok) { tip.textContent = '❌ '+(pres.error||'服务商保存失败'); alert(pres.error||'服务商保存失败'); return; }
+  PROVIDERS = pres.providers || [];
+  renderProviders();
+  renderRoutes();
+  // 恢复路由选择（被规范化改名的选项会落回未选择，保存后由 load 反映实际值）
+  const body = {};
+  for (const [k] of ROUTE_KEYS) {
+    const el = document.querySelector(`[name=${k}]`);
+    if (el && routeVals[k]) { el.value = routeVals[k]; if (el.value) body[k] = el.value; }
+  }
+  e.target.querySelectorAll('input[type=text],input[type=number],input[type=password],textarea').forEach(el=>{
+    if (el.name) body[el.name] = el.value;
+  });
+  e.target.querySelectorAll('input[type=checkbox]').forEach(c=>body[c.name]=c.checked);
+  const res = await fetch('/deepseek/api/settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  const j = await res.json();
+  tip.textContent = j.ok ? '✅ 已保存' : ('❌ '+(j.error||'失败'));
+  if (j.ok) load();
+};
+load();
+
+async function loadTrigger(){
+  const j = await fetch('/deepseek/api/trigger-info').then(r=>r.json());
+  if (!j.ok) return;
+  const i = j.info;
+  document.getElementById('triggerToken').value = i.token || '';
+  const url = document.getElementById('triggerUrl');
+  url.textContent = (i.running ? '✅ 服务运行中：' : '⚠️ 服务未运行：') +
+    (i.url || `http://${i.host}:${i.port}/trigger`) +
+    '（POST，JSON: group_id/text/source）';
+}
+document.getElementById('btnRegenToken').onclick = async ()=>{
+  if (!confirm('重新生成后，旧 token 立即失效，所有监测程序都要更新环境变量。确定？')) return;
+  const j = await fetch('/deepseek/api/trigger-token/regenerate',
+    {method:'POST'}).then(r=>r.json());
+  if (j.ok) { document.getElementById('triggerToken').value = j.token; document.getElementById('tip').textContent='✅ token 已轮换'; }
+  else alert(j.error || '失败');
+};
+loadTrigger();
+
+async function loadLive(){
+  const j = await fetch('/deepseek/api/live-info').then(r=>r.json());
+  if (!j.ok) return;
+  const i = j.info;
+  const st = document.getElementById('liveStatus');
+  st.textContent = (i.running ? `✅ 服务运行中（${i.subscribers} 个订阅）：` : '⚠️ 服务未运行（重连后生效）：') +
+    `token=${i.token ? i.token.slice(0,6)+'…' : '（未生成）'}`;
+  const tok = i.token ? `?token=${encodeURIComponent(i.token)}` : '';
+  const d = document.getElementById('liveDanmaku'), db = document.getElementById('liveDebug');
+  d.href = (i.danmaku || `http://127.0.0.1:${i.port}/live/danmaku`) + tok;
+  db.href = (i.debug || `http://127.0.0.1:${i.port}/live/debug`) + tok;
+}
+loadLive();
+</script>
+</body></html>

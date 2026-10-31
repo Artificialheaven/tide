@@ -1,0 +1,336 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>DeepSeek 群AI · 群设置</title>
+<style>
+body{background:#1a1d23;color:#d7dae0;font:14px/1.6 "Microsoft YaHei",sans-serif;margin:0}
+nav{background:#22262e;padding:10px 20px;border-bottom:1px solid #333}
+nav a{color:#7aa2f7;margin-right:16px;text-decoration:none}
+.wrap{padding:20px;max-width:820px;margin:auto}
+fieldset{border:1px solid #333;border-radius:6px;margin-bottom:16px;padding:12px 16px}
+legend{color:#8b93a7;padding:0 6px}
+label{display:block;margin:8px 0}
+input,select,textarea{background:#22262e;color:#eceff4;border:1px solid #3b4252;border-radius:4px;padding:6px 8px;width:320px;box-sizing:border-box}
+textarea{width:100%;height:120px}
+input[type=checkbox]{width:auto;margin-right:6px}
+button{background:#5e81ac;color:#fff;border:0;border-radius:4px;padding:7px 16px;cursor:pointer;margin-right:8px}
+.hint{color:#6b7280;font-size:12px}
+.tool label{display:inline-block;width:280px}
+</style>
+</head>
+<body>
+<nav>
+  <a href="/deepseek/dashboard?v={{ PLUGIN_VERSION }}">群开关</a>
+  <a href="/deepseek/settings?v={{ PLUGIN_VERSION }}">全局设置</a>
+  <a href="/deepseek/mcp?v={{ PLUGIN_VERSION }}">MCP 工具</a>
+  <a href="/deepseek/memory?v={{ PLUGIN_VERSION }}">群友记忆</a>
+  <a href="/deepseek/runs?v={{ PLUGIN_VERSION }}">后台/轮询</a>
+  <a href="/deepseek/prompts?v={{ PLUGIN_VERSION }}">提示词</a>
+  <span class="hint" style="float:right">v{{ PLUGIN_VERSION }}</span>
+</nav>
+<div class="wrap">
+<h2>群设置 <input id="gidbox" style="width:140px" placeholder="群号">
+<button onclick="loadGroup()" type="button">加载</button>
+<span id="state" class="hint"></span></h2>
+
+<form id="f">
+<fieldset><legend>人设 / 称呼</legend>
+  <label>本群人设（留空继承全局默认人设）</label>
+  <textarea name="persona" placeholder="留空继承全局默认人设"></textarea>
+  <label>本群称呼词（逗号分隔）<input name="aliases"></label>
+</fieldset>
+<fieldset><legend>群级覆盖（留空/继承 = 用全局值）</legend>
+  <label>模型 <select name="model"><option value="">继承全局</option></select></label>
+  <label>深度思考 <select name="enable_thinking"><option value="">继承全局</option><option value="true">强制开</option><option value="false">强制关</option></select></label>
+  <label>仅@触发 <select name="at_only_on"><option value="">继承全局</option><option value="true">开</option><option value="false">关</option></select></label>
+  <label>引用回复 <select name="quote_reply_on"><option value="">继承全局</option><option value="true">开</option><option value="false">关</option></select></label>
+  <label>分条发送 <select name="split_reply"><option value="">继承全局</option><option value="true">强制开</option><option value="false">强制关</option></select></label>
+  <label>启发式粗筛 <select name="heuristic_on"><option value="">继承全局</option><option value="true">开</option><option value="false">关</option></select></label>
+  <label>AI 判官 <select name="judge_on"><option value="">继承全局</option><option value="true">开</option><option value="false">关</option></select></label>
+  <label>AI 初筛脚本 <select name="screen_on"><option value="">继承全局</option><option value="true">开</option><option value="false">关</option></select></label>
+  <label>长期记忆 <select name="memory_on"><option value="">继承全局</option><option value="true">开</option><option value="false">关</option></select></label>
+  <label>她的自我记忆 <select name="self_memory_on"><option value="">继承全局</option><option value="true">开</option><option value="false">关</option></select></label>
+  <label>心情 <select name="mood_on"><option value="">继承全局</option><option value="true">开</option><option value="false">关</option></select></label>
+  <label>风格学习 <select name="learn_style_on"><option value="">继承全局</option><option value="true">开</option><option value="false">关</option></select></label>
+  <label>主动提醒 <select name="reminder_on"><option value="">继承全局</option><option value="true">开</option><option value="false">关</option></select></label>
+  <label>定时苏醒 <select name="wake_on"><option value="">继承全局</option><option value="true">开</option><option value="false">关</option></select></label>
+  <label>主动搭话 <select name="speakup_on"><option value="">继承全局</option><option value="true">开</option><option value="false">关</option></select></label>
+  <label>执行中打断 <select name="interrupt_on"><option value="">继承全局</option><option value="true">开</option><option value="false">关</option></select></label>
+  <label>触发前背景消息 <select name="ambient_context_on"><option value="">继承全局</option><option value="true">开</option><option value="false">关</option></select></label>
+  <label>长跑模式 <select name="loop_on"><option value="">继承全局</option><option value="true">开</option><option value="false">关</option></select></label>
+  <label>梗指南自动注入 <select name="meme_guide_on"><option value="">继承全局</option><option value="true">开</option><option value="false">关</option></select></label>
+  <label>滑窗轮数（空=继承）<input name="window_rounds" type="number" placeholder="继承"></label>
+  <label>滑窗字符预算（空=继承）<input name="char_budget" type="number" placeholder="继承"></label>
+  <label>背景消息条数（空=继承）<input name="ambient_context_n" type="number" placeholder="继承"></label>
+  <label>长跑汇报间隔（工具轮，空=继承）<input name="loop_every_rounds" type="number" min="1" placeholder="继承"></label>
+</fieldset>
+<fieldset><legend>群体说话风格画像</legend>
+  <textarea name="style_text" style="height:160px" placeholder="尚无画像。群语料攒够后点「立即学习」，也可以直接手写。"></textarea>
+  <div style="margin-top:6px">
+    <button type="button" id="bStyleBuild">立即学习</button>
+    <button type="button" id="bStyleClear">清空画像</button>
+    <span class="hint" id="styleInfo"></span>
+  </div>
+</fieldset>
+<fieldset><legend>本群约定 / 待办</legend><div id="commitments"></div></fieldset>
+<fieldset class="tool"><legend>工具勾选（未列出的默认开启）</legend><div id="tools"></div></fieldset>
+<button type="submit">保存</button>
+<button type="button" id="bToggle">开启/关闭 AI</button>
+<button type="button" id="bReset">清空对话记忆</button>
+<button type="button" id="bSum">立即抽取记忆</button>
+<span class="hint" id="tip"></span>
+</form>
+<div id="usageBox" style="margin:8px 0"></div>
+<fieldset id="moodBox" style="display:none"><legend>本群心情（每群一份；心情变化只对她的下一轮说一次）</legend>
+  <div id="moodView"></div>
+  <button type="button" id="bMoodReset" style="margin-top:8px">重置为基线</button>
+</fieldset>
+</div>
+<script>
+let GID = new URLSearchParams(location.search).get('gid') || '';
+const BUILTIN = [['qq.text','群发文本'],['qq.image','群发图片'],['qq.voice','群发语音'],
+ ['qq.at_all','@全体成员（主人）'],['qq.member_info','查群成员身份'],
+ ['fs.list','列文件'],['fs.read','读文件'],['fs.write','写文件'],['fs.append','追加文件'],['fs.delete','删文件'],
+ ['fs.publish','沉淀素材到公共库'],
+ ['inject.add','加自我提示词注入'],['inject.list','查注入表'],['inject.toggle','启停注入'],['inject.remove','删注入'],
+ ['memory.recall','查群友记忆'],['memory.remember','记群友信息'],
+ ['memory.recall_self','查我自己的记忆'],['memory.remember_self','记我自己的记忆'],
+ ['task.add','记约定/待办'],['task.list','查约定/待办'],['task.close','完成待办'],
+ ['schedule.add','登记定时任务'],['schedule.list','查定时任务'],['schedule.cancel','取消定时任务'],
+ ['poll.add','登记轮询设定'],['poll.list','查轮询设定'],['poll.toggle','启停轮询'],['poll.remove','删轮询'],
+ ['watcher.start','启动监测程序（主人）'],['watcher.list','查监测程序'],
+ ['watcher.stop','停止监测程序（主人）'],['watcher.logs','看监测日志'],
+ ['history.query','查历史消息'],['usage.stats','查token用量'],
+ ['qzone.publish','发QQ空间说说（主人）'],['qzone.delete','删QQ空间说说（主人）'],
+ ['qzone.recent','查空间发布留痕'],
+ ['message.read_image','回看消息图片'],['message.read_forward','展开合并转发'],
+ ['meme.lookup','梗指南查梗'],
+ ['code.python','执行Python（主人）'],['code.shell','执行Shell（主人）']];
+const SEL_KEYS = ['model','enable_thinking','split_reply','heuristic_on','judge_on',
+                  'memory_on','self_memory_on','mood_on','learn_style_on','reminder_on','wake_on',
+                  'speakup_on','interrupt_on','ambient_context_on','screen_on',
+                  'loop_on','meme_guide_on','at_only_on','quote_reply_on'];
+let overrides = {};
+// 不用 F 这种 document 级具名简写（部分浏览器/WebView 拿不到）
+const F = document.getElementById('f');
+
+async function loadGroup(){
+  GID = document.getElementById('gidbox').value.trim() || GID;
+  if (!GID) return;
+  const [rg, rm, rs, rc, ru, rmo, rpv] = await Promise.all([
+    fetch(`/deepseek/api/groups/${GID}`).then(r=>r.json()),
+    fetch('/deepseek/api/mcp').then(r=>r.json()),
+    fetch(`/deepseek/api/groups/${GID}/style`).then(r=>r.json()),
+    fetch(`/deepseek/api/groups/${GID}/commitments`).then(r=>r.json()),
+    fetch(`/deepseek/api/groups/${GID}/usage?days=30`).then(r=>r.json()),
+    fetch(`/deepseek/api/groups/${GID}/mood?limit=20`).then(r=>r.json()),
+    fetch('/deepseek/api/llm-providers').then(r=>r.json())]);
+  if (!rg.ok){ document.getElementById('state').textContent='群不存在（保存即创建）'; return; }
+  const g = rg.group;
+  document.getElementById('state').textContent = g.enabled?'（AI 已开启）':'（AI 未开启）';
+  F.persona.value = g.persona||'';
+  F.aliases.value = g.aliases||'';
+  // 模型下拉按服务商分组动态填充；已存的悬空值落回「继承全局」
+  fillModelSelect(rpv.providers||[]);
+  const st = g.settings||{};
+  for (const k of SEL_KEYS){
+    const el = F[k];
+    if (el) el.value = (k in st) ? String(st[k]) : '';
+  }
+  F.window_rounds.value = st.window_rounds ?? '';
+  F.char_budget.value = st.char_budget ?? '';
+  F.ambient_context_n.value = st.ambient_context_n ?? '';
+  F.loop_every_rounds.value = st.loop_every_rounds ?? '';
+  overrides = g.tools||{};
+
+  F.style_text.value = rs.style || '';
+  document.getElementById('styleInfo').textContent =
+    `样本 ${rs.sample_count||0} 条，待学新语料 ${rs.new_msgs||0} 条`;
+  renderCommitments(rc.commitments||[]);
+
+  const box = document.getElementById('tools');
+  box.innerHTML = '';
+  for (const [key,label] of BUILTIN) addTool(box,key,label,overrides[key]);
+  // MCP：只列已启用服务器；spec 名缓存时已带 mcp__sid__ 前缀，直接用作 key
+  // （旧版手拼了双层前缀，勾选存成 mcp__sid__mcp__sid__tool，实际不生效）
+  for (const s of (rm.servers||[])) {
+    if (!s.enabled || !(s.tools||[]).length) continue;
+    const head = document.createElement('div');
+    head.className = 'hint';
+    head.style.cssText = 'margin-top:8px;width:100%';
+    head.textContent = `🔌 MCP ${s.name||s.id}`;
+    box.appendChild(head);
+    for (const spec of (s.tools||[])) {
+      const key = spec.function.name;
+      addTool(box,key,spec.function.description||key,overrides[key]);
+    }
+  }
+  const u = g.usage||{};
+  document.getElementById('tip').textContent =
+    `用量：入 ${u.tokens_in||0} / 出 ${u.tokens_out||0}（判官${(u.by_kind||{}).judge||0}次）`;
+  renderUsage(ru);
+  renderMood(rmo);
+}
+const MOOD_SOURCE_CN = {human:'群聊',talk:'主动搭话',work:'后台任务',greet:'进群'};
+function escHtml(s){return String(s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
+function renderMood(rm){
+  const box = document.getElementById('moodBox');
+  if (!rm || !rm.ok){ box.style.display='none'; return; }
+  box.style.display = '';
+  const s = rm.state||{};
+  const dims = Object.entries(s.dims_now||{})
+    .filter(([,v])=>v>=1).map(([k,v])=>`${k}${Math.round(v)}`).join(' ');
+  let html = `<div>当前心情 <b>${Math.round(s.mood_now==null?70:s.mood_now)}</b>`
+    + (dims ? ` ｜ 七绪：${escHtml(dims)}` : '') + '</div>';
+  if (s.has_pending){
+    html += `<div class="hint">待宣布：${escHtml(s.pending_reason)}`
+      + `（Δ${s.pending_delta>=0?'+':''}${s.pending_delta}，信心${s.pending_confidence}；今日已注入${s.inject_count||0}次）</div>`;
+  }
+  const tl = rm.timeline||[];
+  if (tl.length){
+    html += '<table style="margin-top:6px;font-size:12px;width:100%;table-layout:fixed">'
+      + '<colgroup><col style="width:132px"><col style="width:64px"><col style="width:74px"><col></colgroup><tbody>';
+    for (const t of tl){
+      const when = new Date(t.ts*1000).toLocaleString();
+      const d = t.delta ? `${t.delta>0?'+':''}${t.delta}` : '—';
+      const tag = t.kind==='reset' ? '重置' : (MOOD_SOURCE_CN[t.source]||t.source||'');
+      html += `<tr><td class="hint" style="white-space:nowrap">${when}</td>`
+        + `<td>${escHtml(tag)}</td><td>${d}→${Math.round(t.mood_after)}</td>`
+        + `<td style="word-break:break-all">${escHtml(t.reason)}${t.injected?' ✅已注入':''}</td></tr>`;
+    }
+    html += '</tbody></table>';
+  } else {
+    html += '<div class="hint" style="margin-top:4px">还没有心情记录。</div>';
+  }
+  document.getElementById('moodView').innerHTML = html;
+}
+document.getElementById('bMoodReset').onclick = async ()=>{
+  if (!GID) return;
+  if (!confirm('把本群心情重置为基线、清空七绪？（时间线保留）')) return;
+  const r = await fetch(`/deepseek/api/groups/${GID}/mood/reset`,{method:'POST'}).then(r=>r.json());
+  if (r.ok) loadGroup();
+};
+const USAGE_KIND_CN = {chat:'对话',judge:'判官',summary:'摘要',extract:'记忆抽取',
+  style:'风格学习',scheduled:'定时任务',mood:'心情判断'};
+function fmt(n){return (n||0).toLocaleString();}
+function renderUsage(ru){
+  const box = document.getElementById('usageBox');
+  if (!ru || !ru.ok || !ru.breakdown){ box.innerHTML=''; return; }
+  const t = ru.breakdown.totals||{};
+  const tin = (t.cached||0)+(t.uncached||0);
+  const rate = tin ? ((t.cached||0)/tin*100).toFixed(1)+'%' : '—';
+  let html = `<div style="font-weight:bold;margin-bottom:4px">Token 用量（近30天，共 ${t.calls||0} 次调用）</div>`
+    + `<div class="hint">输入命中缓存 <b>${fmt(t.cached)}</b>`
+    + ` ｜ 输入未命中 <b>${fmt(t.uncached)}</b> ｜ 输出 <b>${fmt(t.out)}</b>`
+    + ` ｜ 命中率 ${rate}</div>`;
+  const by = ru.breakdown.by_kind||[];
+  if (by.length){
+    html += `<table style="margin-top:6px;font-size:12px"><thead><tr>`
+      + `<th>类型</th><th>调用</th><th>命中</th><th>未命中</th><th>输出</th>`
+      + `</tr></thead><tbody>`;
+    for (const k of by){
+      html += `<tr><td>${USAGE_KIND_CN[k.kind]||k.kind}</td><td>${k.calls}</td>`
+        + `<td>${fmt(k.cached)}</td><td>${fmt(k.uncached)}</td><td>${fmt(k.out)}</td></tr>`;
+    }
+    html += '</tbody></table>';
+  }
+  box.innerHTML = html;
+}
+function renderCommitments(rows){
+  const box = document.getElementById('commitments');
+  if (!rows.length){ box.innerHTML = '<span class="hint">暂无未结事项</span>'; return; }
+  box.innerHTML = '';
+  for (const c of rows){
+    const d = document.createElement('div');
+    d.style.margin = '4px 0';
+    const due = c.due_text ? ` ⏰${c.due_text}` : '';
+    d.innerHTML = `<span class="hint">[${c.id}][${c.kind==='topic'?'话题':'待办'}]</span>
+      <b></b>：<span class="ct"></span>${due}
+      <button type="button" style="padding:2px 10px">完成</button>
+      <button type="button" style="padding:2px 10px">取消</button>`;
+    d.querySelector('b').textContent = c.owner_name;
+    d.querySelector('.ct').textContent = c.content;
+    const [bDone, bCancel] = d.querySelectorAll('button');
+    bDone.onclick = async ()=>{
+      await fetch(`/deepseek/api/commitments/${c.id}`,{method:'PUT',
+        headers:{'Content-Type':'application/json'},body:JSON.stringify({status:'done'})});
+      loadGroup();
+    };
+    bCancel.onclick = async ()=>{
+      await fetch(`/deepseek/api/commitments/${c.id}`,{method:'DELETE'});
+      loadGroup();
+    };
+    box.appendChild(d);
+  }
+}
+function fillModelSelect(providers){
+  const el = F.model;
+  el.innerHTML = '<option value="">继承全局</option>';
+  for (const p of providers) {
+    const og = document.createElement('optgroup');
+    og.label = p.label || p.id;
+    for (const m of (p.models||[])) {
+      const o = document.createElement('option');
+      o.value = `${p.id}/${m.id}`;
+      o.textContent = m.label || m.id;
+      og.appendChild(o);
+    }
+    el.appendChild(og);
+  }
+}
+function addTool(box,key,label,val){
+  const id='t_'+encodeURIComponent(key);
+  const d=document.createElement('label');
+  d.innerHTML = `<input type="checkbox" id="${id}"> ${label} <span class="hint">${key}</span>`;
+  const cb=d.querySelector('input');
+  cb.checked = val===undefined ? true : val;
+  cb.dataset.key=key;
+  box.appendChild(d);
+}
+document.getElementById('f').onsubmit = async e=>{
+  e.preventDefault();
+  if (!GID){ document.getElementById('tip').textContent='请先加载群号'; return; }
+  const st={};
+  for (const k of SEL_KEYS){
+    const el=F[k];
+    if(!el) continue;
+    const v=el.value;
+    if (v!=='') st[k] = (v==='true')?true:(v==='false'?false:v);
+  }
+  for (const k of ['window_rounds','char_budget','ambient_context_n','loop_every_rounds']){
+    const v=F[k].value.trim();
+    if (v) st[k]=Number(v);
+  }
+  const body={persona:F.persona.value, aliases:F.aliases.value, settings:st};
+  await fetch(`/deepseek/api/groups/${GID}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  await fetch(`/deepseek/api/groups/${GID}/style`,{method:'PUT',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({style_text:F.style_text.value})});
+  const tools={};
+  document.querySelectorAll('#tools input[type=checkbox]').forEach(cb=>tools[cb.dataset.key]=cb.checked);
+  await fetch(`/deepseek/api/groups/${GID}/tools`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({tools})});
+  document.getElementById('tip').textContent='✅ 已保存';
+};
+document.getElementById('bToggle').onclick=async()=>{await fetch(`/deepseek/api/groups/${GID}/toggle`,{method:'POST'});loadGroup();};
+document.getElementById('bReset').onclick=async()=>{if(confirm('清空该群对话历史与摘要？')){await fetch(`/deepseek/api/groups/${GID}/reset-memory`,{method:'POST'});loadGroup();}};
+document.getElementById('bSum').onclick=async()=>{
+  document.getElementById('tip').textContent='抽取中…';
+  const r=await fetch(`/deepseek/api/groups/${GID}/summarize-now`,{method:'POST'}).then(r=>r.json());
+  document.getElementById('tip').textContent=r.ok?'✅ 抽取完成':('❌ '+r.error);
+};
+document.getElementById('bStyleBuild').onclick=async()=>{
+  document.getElementById('tip').textContent='风格学习中…';
+  const r=await fetch(`/deepseek/api/groups/${GID}/style/build-now`,{method:'POST'}).then(r=>r.json());
+  document.getElementById('tip').textContent=r.ok?'✅ 风格画像已更新':('❌ '+(r.error||'语料不足'));
+  loadGroup();
+};
+document.getElementById('bStyleClear').onclick=async()=>{
+  if(!confirm('清空该群风格画像？（原始语料保留）')) return;
+  await fetch(`/deepseek/api/groups/${GID}/style`,{method:'DELETE'});
+  loadGroup();
+};
+document.getElementById('gidbox').value=GID;
+if (GID) loadGroup();
+</script>
+</body></html>

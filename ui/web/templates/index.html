@@ -1,0 +1,583 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NapCatBot 管理面板</title>
+<style>
+:root {
+  --bg: #0f1117; --card: #1a1d27; --border: #2a2d3a;
+  --text: #c9d1d9; --muted: #6e7681; --accent: #58a6ff;
+  --green: #3fb950; --red: #f85149; --yellow: #d2991d;
+  --purple: #a371f7; --orange: #db6d28;
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  background: var(--bg); color: var(--text); min-height:100vh; }
+
+/* ---------- 登录页 ---------- */
+.login-wrap { display:flex; align-items:center; justify-content:center;
+  min-height:100vh; }
+.login-card { background:var(--card); border:1px solid var(--border);
+  border-radius:12px; padding:48px 40px; width:380px; text-align:center; }
+.login-card h1 { font-size:24px; margin-bottom:4px; color:#fff; }
+.login-card p { color:var(--muted); margin-bottom:24px; font-size:14px; }
+.login-card input { width:100%; padding:12px 16px; border:1px solid var(--border);
+  border-radius:8px; background:var(--bg); color:#fff; font-size:15px;
+  outline:none; transition:border .2s; }
+.login-card input:focus { border-color:var(--accent); }
+.login-card button { width:100%; padding:12px; margin-top:16px;
+  border:none; border-radius:8px; background:var(--accent); color:#fff;
+  font-size:15px; cursor:pointer; font-weight:600; }
+.login-card button:hover { opacity:.9; }
+.login-error { color:var(--red); margin-top:12px; font-size:13px; display:none; }
+
+/* ---------- 主面板 ---------- */
+.app { display:none; max-width:1200px; margin:0 auto; padding:20px; }
+.app.active { display:block; }
+header { display:flex; align-items:center; justify-content:space-between;
+  padding:16px 0; border-bottom:1px solid var(--border); margin-bottom:24px; }
+header h1 { font-size:20px; color:#fff; }
+header .header-right { display:flex; gap:12px; align-items:center; }
+.btn { padding:8px 16px; border:1px solid var(--border); border-radius:6px;
+  background:var(--card); color:var(--text); cursor:pointer; font-size:13px;
+  transition:all .2s; }
+.btn:hover { border-color:var(--accent); }
+.btn-sm { padding:4px 10px; font-size:12px; }
+.btn-red { border-color:var(--red); color:var(--red); }
+.btn-green { border-color:var(--green); color:var(--green); }
+.btn-green:hover { background:var(--green); color:#000; }
+.btn-red:hover { background:var(--red); color:#fff; }
+.badge { display:inline-block; padding:2px 8px; border-radius:10px;
+  font-size:11px; font-weight:600; }
+.badge-ok { background:rgba(63,185,80,.15); color:var(--green); }
+.badge-warn { background:rgba(210,153,29,.15); color:var(--yellow); }
+
+nav { display:flex; gap:4px; margin-bottom:24px; flex-wrap:wrap; }
+nav button { padding:10px 20px; border:1px solid transparent;
+  border-radius:8px; background:transparent; color:var(--muted);
+  cursor:pointer; font-size:14px; transition:all .2s; }
+nav button:hover { color:var(--text); }
+nav button.active { background:var(--card); border-color:var(--border); color:#fff; }
+
+.tab { display:none; }
+.tab.active { display:block; }
+
+/* ---------- 卡片 ---------- */
+.cards { display:grid; grid-template-columns:repeat(auto-fill,minmax(240px,1fr)); gap:16px; margin-bottom:24px; }
+.card { background:var(--card); border:1px solid var(--border);
+  border-radius:10px; padding:20px; }
+.card h3 { font-size:13px; color:var(--muted); text-transform:uppercase;
+  letter-spacing:.5px; margin-bottom:8px; }
+.card .val { font-size:28px; font-weight:700; color:#fff; }
+.card .sub { font-size:12px; color:var(--muted); margin-top:4px; }
+
+/* ---------- 进度条 ---------- */
+.progress-wrap { margin:8px 0; }
+.progress-bar { height:8px; border-radius:4px; background:var(--border); overflow:hidden; }
+.progress-bar .fill { height:100%; border-radius:4px; transition:width .5s; }
+.progress-wrap .label { display:flex; justify-content:space-between;
+  font-size:12px; margin-bottom:4px; }
+
+/* ---------- 表格 ---------- */
+table { width:100%; border-collapse:collapse; font-size:13px; }
+th, td { padding:10px 12px; text-align:left; border-bottom:1px solid var(--border); }
+th { color:var(--muted); font-weight:600; text-transform:uppercase; font-size:11px; }
+tr:hover { background:rgba(255,255,255,.02); }
+
+/* ---------- 配置表单 ---------- */
+.form-group { margin-bottom:16px; }
+.form-group label { display:block; font-size:12px; color:var(--muted);
+  margin-bottom:4px; text-transform:uppercase; }
+.form-group input, .form-group select { width:100%; padding:10px;
+  border:1px solid var(--border); border-radius:6px; background:var(--bg);
+  color:var(--text); font-size:14px; outline:none; }
+.form-group input:focus { border-color:var(--accent); }
+.form-row { display:flex; gap:12px; }
+.form-row .form-group { flex:1; }
+
+/* ---------- 日志 ---------- */
+.log-list { background:var(--bg); border:1px solid var(--border);
+  border-radius:8px; max-height:500px; overflow-y:auto; padding:12px;
+  font-family:'Cascadia Code','Fira Code',monospace; font-size:12px; }
+.log-line { padding:4px 0; display:flex; gap:10px; border-bottom:1px solid rgba(255,255,255,.03); }
+.log-time { color:var(--muted); min-width:60px; }
+.log-src { color:var(--purple); min-width:100px; }
+.log-msg { flex:1; }
+.log-line[data-color="红色"] .log-msg { color:var(--red); }
+.log-line[data-color="绿色"] .log-msg { color:var(--green); }
+.log-line[data-color="黄色"] .log-msg { color:var(--yellow); }
+.log-line[data-color="蓝色"] .log-msg { color:var(--accent); }
+
+/* ---------- 响应式 ---------- */
+@media(max-width:768px) {
+  .cards { grid-template-columns:1fr; }
+  nav { flex-direction:column; }
+}
+
+/* ---------- 模态对话框 ---------- */
+.modal-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,.6);
+  z-index:100; align-items:center; justify-content:center; }
+.modal-overlay.show { display:flex; }
+.modal-box { background:var(--card); border:1px solid var(--border);
+  border-radius:12px; padding:28px; width:520px; max-height:80vh; overflow-y:auto; }
+.modal-box h2 { color:#fff; font-size:18px; margin-bottom:16px; }
+.modal-box .field-group { margin-bottom:14px; }
+.modal-box .field-group label { display:block; font-size:12px; color:var(--muted);
+  margin-bottom:4px; text-transform:uppercase; }
+.modal-box .field-group input[type=text],
+.modal-box .field-group input[type=number],
+.modal-box .field-group select { width:100%; padding:9px; border:1px solid var(--border);
+  border-radius:6px; background:var(--bg); color:var(--text); font-size:14px; outline:none; }
+.modal-box .field-group input:focus,
+.modal-box .field-group select:focus { border-color:var(--accent); }
+.modal-box .radio-group { display:flex; gap:16px; flex-wrap:wrap; }
+.modal-box .radio-group label { display:flex; align-items:center; gap:6px;
+  font-size:14px; color:var(--text); cursor:pointer; }
+.modal-box .check-group { display:flex; align-items:center; gap:8px; }
+.modal-box .btn-row { display:flex; gap:12px; margin-top:20px; justify-content:flex-end; }
+</style>
+</head>
+<body>
+
+<!-- ================= 登录页 ================= -->
+<div class="login-wrap" id="loginPage">
+  <div class="login-card">
+    <h1>NapCatBot</h1>
+    <p>请输入管理密码</p>
+    <input type="password" id="loginPwd" placeholder="Token / 密码"
+           autofocus onkeydown="if(event.key==='Enter')doLogin()">
+    <button onclick="doLogin()">登 录</button>
+    <div class="login-error" id="loginError">密码错误</div>
+  </div>
+</div>
+
+<!-- ================= 主面板 ================= -->
+<div class="app" id="mainApp">
+  <header>
+    <h1>🔥 NapCatBot</h1>
+    <div class="header-right">
+      <span class="badge badge-ok" id="wsBadge">● 已连接</span>
+      <button class="btn btn-red btn-sm" onclick="doLogout()">登出</button>
+    </div>
+  </header>
+
+  <nav>
+    <button class="active" data-tab="dash">📊 仪表盘</button>
+    <button data-tab="config">⚙️ 配置</button>
+    <button data-tab="plugins">🔌 插件</button>
+    <button data-tab="status">💻 状态</button>
+    <button data-tab="logs">📜 日志</button>
+  </nav>
+
+  <!-- ====== 仪表盘 ====== -->
+  <div class="tab active" id="tab-dash">
+    <div class="cards" id="dashCards"></div>
+    <div class="card" id="dashTrend"></div>
+  </div>
+
+  <!-- ====== 配置 ====== -->
+  <div class="tab" id="tab-config">
+    <div class="card" style="max-width:700px">
+      <h3>系统配置</h3>
+      <form id="configForm" style="margin-top:16px"></form>
+      <button class="btn btn-green" onclick="saveConfig()" style="margin-top:16px">💾 保存配置</button>
+      <span id="configMsg" style="margin-left:12px;font-size:13px"></span>
+    </div>
+  </div>
+
+  <!-- ====== 插件 ====== -->
+  <div class="tab" id="tab-plugins">
+    <div class="card">
+      <h3>已加载插件</h3>
+      <table id="pluginTable" style="margin-top:12px">
+        <thead><tr><th>名称</th><th>版本</th><th>描述</th><th>状态</th><th>操作</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ====== 状态 ====== -->
+  <div class="tab" id="tab-status">
+    <div class="cards" id="statusCards"></div>
+  </div>
+
+  <!-- ====== 日志 ====== -->
+  <div class="tab" id="tab-logs">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+      <h3 style="font-size:16px">实时日志</h3>
+      <div>
+        <label style="font-size:12px;color:var(--muted);margin-right:8px">自动滚动</label>
+        <input type="checkbox" id="autoScroll" checked>
+        <button class="btn btn-sm" onclick="clearLogs()" style="margin-left:8px">清空</button>
+      </div>
+    </div>
+    <div class="log-list" id="logContainer"></div>
+  </div>
+</div>
+
+<!-- ================= 插件配置模态 ================= -->
+<div class="modal-overlay" id="pluginCfgModal">
+  <div class="modal-box">
+    <h2 id="pluginCfgTitle">插件配置</h2>
+    <form id="pluginCfgForm"></form>
+    <span id="pluginCfgMsg" style="font-size:13px"></span>
+    <div class="btn-row">
+      <button class="btn" onclick="closePluginConfig()">取消</button>
+      <button class="btn btn-green" onclick="savePluginConfig()">💾 保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 脚本 ================= -->
+<script async src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+<script>
+// ====== 全局状态 ======
+let socket = null;
+let activeTab = 'dash';
+
+// ====== 初始化 ======
+(async function init() {
+  // 先尝试已有 session
+  const resp = await fetch('/api/check_auth');
+  const data = await resp.json();
+  if (data.authenticated) {
+    showApp();
+    return;
+  }
+  // session 过期 → 尝试用 localStorage 保存的 token 自动登录
+  const savedToken = localStorage.getItem('napcat_token');
+  if (savedToken) {
+    const loginResp = await fetch('/api/login', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({password: savedToken})
+    });
+    const loginData = await loginResp.json();
+    if (loginData.ok) {
+      showApp();
+      return;
+    }
+    // token 已失效，清除
+    localStorage.removeItem('napcat_token');
+  }
+})();
+
+// ====== 登录 ======
+async function doLogin() {
+  const pwd = document.getElementById('loginPwd').value;
+  const resp = await fetch('/api/login', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({password:pwd})
+  });
+  const data = await resp.json();
+  if (data.ok) {
+    localStorage.setItem('napcat_token', pwd);
+    showApp();
+  } else {
+    document.getElementById('loginError').style.display = 'block';
+  }
+}
+
+function showApp() {
+  document.getElementById('loginPage').style.display = 'none';
+  document.getElementById('mainApp').classList.add('active');
+  connectSocket();
+  loadAll();
+  // 定时刷新
+  setInterval(() => { if(activeTab==='dash') loadDash(); if(activeTab==='status') loadStatus(); }, 3000);
+}
+
+async function doLogout() {
+  localStorage.removeItem('napcat_token');
+  await fetch('/api/logout', {method:'POST'});
+  location.reload();
+}
+
+// ====== WebSocket ======
+function connectSocket() {
+  if (typeof io === 'undefined') { console.warn('socket.io 尚未加载，跳过 WebSocket 连接'); return; }
+  socket = io();
+  socket.on('log_entry', (entry) => {
+    if (activeTab === 'logs') appendLogLine(entry);
+  });
+}
+
+// ====== 标签切换 ======
+document.querySelectorAll('nav button').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('nav button').forEach(b=>b.classList.remove('active'));
+    btn.classList.add('active');
+    activeTab = btn.dataset.tab;
+    document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+    document.getElementById('tab-'+activeTab).classList.add('active');
+    if (activeTab==='dash') loadDash();
+    if (activeTab==='config') loadConfig();
+    if (activeTab==='plugins') loadPlugins();
+    if (activeTab==='status') loadStatus();
+    if (activeTab==='logs') loadLogs();
+  });
+});
+
+// ====== 仪表盘 ======
+async function loadDash() {
+  const [m, s] = await Promise.all([
+    fetch('/api/monitor').then(r=>r.json()),
+    fetch('/api/status').then(r=>r.json())
+  ]);
+  document.getElementById('wsBadge').textContent = s.ws_connected ? '● 已连接' : '● 未连接';
+  document.getElementById('wsBadge').className = s.ws_connected ? 'badge badge-ok' : 'badge badge-warn';
+  document.getElementById('dashCards').innerHTML = `
+    <div class="card"><h3>Bot ID</h3><div class="val">${s.bot_id}</div></div>
+    <div class="card"><h3>累计发送</h3><div class="val">${m.sent}</div></div>
+    <div class="card"><h3>累计接收</h3><div class="val">${m.received}</div></div>
+    <div class="card"><h3>本分钟发送</h3><div class="val" style="color:var(--accent)">${m.sent_minute}</div></div>
+    <div class="card"><h3>本分钟接收</h3><div class="val" style="color:var(--green)">${m.received_minute}</div></div>
+    <div class="card"><h3>WebSocket</h3><div class="val" style="color:${s.ws_connected?'var(--green)':'var(--red)'}">${s.ws_connected?'已连接':'已断开'}</div></div>
+  `;
+  renderTrend(m.trend);
+}
+
+// ====== 每分钟趋势（文本柱状图，最近20分钟） ======
+function renderTrend(trend) {
+  const box = document.getElementById('dashTrend');
+  if (!trend || trend.length === 0) {
+    box.innerHTML = '<h3>最近20分钟趋势</h3><div class="sub">暂无数据，等待下一分钟…</div>';
+    return;
+  }
+  const rows = trend.slice(-20);
+  const maxV = Math.max(1, ...rows.map(r => Math.max(r.received, r.sent)));
+  const bar = v => '█'.repeat(Math.round(v / maxV * 20)).padEnd(20);
+  box.innerHTML =
+    '<h3>最近20分钟趋势（条/分钟）</h3>' +
+    '<div style="font-family:monospace;font-size:12px;white-space:pre;line-height:1.5">' +
+    rows.map(r =>
+      `${r.time} <span style="color:var(--green)">${bar(r.received)}</span> 收:${String(r.received).padStart(3)}  ` +
+      `<span style="color:var(--accent)">${bar(r.sent)}</span> 发:${String(r.sent).padStart(3)}`
+    ).join('\n') +
+    '</div>' +
+    '<div class="sub" style="margin-top:8px">图例：<span style="color:var(--green)">███</span> 接收　<span style="color:var(--accent)">███</span> 发送</div>';
+}
+
+// ====== 配置 ======
+async function loadConfig() {
+  const resp = await fetch('/api/config');
+  const cfg = await resp.json();
+  const form = document.getElementById('configForm');
+  const fields = [
+    {key:'show_heartbeat',label:'显示心跳',type:'checkbox'},
+    {key:'ws_address',label:'WebSocket 地址'},
+    {key:'token',label:'Token'},
+    {key:'use_plugin_venv',label:'插件独立环境',type:'checkbox'},
+    {key:'max_reconnect_attempts',label:'最大重连次数 (0=无限)'},
+    {key:'reconnect_base_delay',label:'重连初始延迟(秒)'},
+    {key:'reconnect_max_delay',label:'重连最大延迟(秒)'},
+    {key:'enable_web_admin',label:'启用 Web 管理面板',type:'checkbox'},
+    {key:'web_admin_host',label:'Web 面板监听地址（0.0.0.0=所有网卡，127.0.0.1=仅本机；改后重启生效）'},
+    {key:'web_admin_port',label:'Web 面板端口（1-65535，改后重启生效）'},
+  ];
+  form.innerHTML = fields.map(f => {
+    if (f.type === 'checkbox') {
+      return `<div class="form-group"><label>${f.label}</label>
+        <input type="checkbox" name="${f.key}" ${cfg[f.key]?'checked':''} style="width:auto"></div>`;
+    }
+    return `<div class="form-group"><label>${f.label}</label>
+      <input name="${f.key}" value="${cfg[f.key]??''}"></div>`;
+  }).join('');
+}
+
+async function saveConfig() {
+  const form = document.getElementById('configForm');
+  const fd = new FormData(form);
+  const data = {};
+  for (const [k,v] of fd.entries()) {
+    if (v === 'on') data[k] = true;
+    else if (v === '') data[k] = false;
+    else if (!isNaN(v) && ['max_reconnect_attempts','reconnect_base_delay','reconnect_max_delay','web_admin_port'].includes(k)) data[k] = parseInt(v);
+    else data[k] = v;
+  }
+  const resp = await fetch('/api/config', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(data)
+  });
+  const r = await resp.json();
+  const msg = document.getElementById('configMsg');
+  if (r.ok) { msg.textContent='✅ 保存成功'; msg.style.color='var(--green)'; }
+  else { msg.textContent='❌ 保存失败'; msg.style.color='var(--red)'; }
+}
+
+ // ====== 插件 ======
+async function loadPlugins() {
+  const resp = await fetch('/api/plugins');
+  const data = await resp.json();
+  const tbody = document.querySelector('#pluginTable tbody');
+  const plugins = data.plugins || {};
+  tbody.innerHTML = Object.entries(plugins).map(([k,v]) => `
+    <tr>
+      <td>${v.name||k}</td>
+      <td>${v.version||'—'}</td>
+      <td style="color:var(--muted)">${v.description||'—'}</td>
+      <td><span class="badge ${v.enabled?'badge-ok':'badge-warn'}">${v.enabled?'启用':'禁用'}</span></td>
+      <td>
+        ${v.has_web_page
+          ? `<button class="btn btn-sm btn-green" onclick="window.open('/${k}/','_blank')">🌐 页面</button>`
+          : ''}
+        <button class="btn btn-sm" onclick="reloadPlugin('${k}')">🔄 重载</button>
+        ${v.enabled
+          ? `<button class="btn btn-sm btn-red" onclick="disablePlugin('${k}')">禁用</button>`
+          : `<button class="btn btn-sm btn-green" onclick="enablePlugin('${k}')">启用</button>`}
+        ${v.has_web_config
+          ? `<button class="btn btn-sm" onclick="openPluginConfig('${k}')">⚙️ 配置</button>`
+          : ''}
+      </td>
+    </tr>`).join('');
+}
+
+async function reloadPlugin(name) {
+  await fetch('/api/plugins/'+name+'/reload', {method:'POST'});
+  loadPlugins();
+}
+async function enablePlugin(name) {
+  await fetch('/api/plugins/'+name+'/enable', {method:'POST'});
+  loadPlugins();
+}
+async function disablePlugin(name) {
+  await fetch('/api/plugins/'+name+'/disable', {method:'POST'});
+  loadPlugins();
+}
+
+// ====== 状态 ======
+async function loadStatus() {
+  const resp = await fetch('/api/status');
+  const s = await resp.json();
+  const bar = (pct,color) => `<div class="progress-bar"><div class="fill" style="width:${pct}%;background:${color}"></div></div>`;
+  document.getElementById('statusCards').innerHTML = `
+    <div class="card">
+      <h3>🖥 CPU</h3>
+      <div class="val">${s.cpu_percent}%</div>
+      <div class="sub">${s.cpu_count} 核心</div>
+      ${bar(s.cpu_percent, 'var(--accent)')}
+    </div>
+    <div class="card">
+      <h3>🧠 内存</h3>
+      <div class="val">${s.mem_percent}%</div>
+      <div class="sub">${s.mem_used_gb} / ${s.mem_total_gb} GB</div>
+      ${bar(s.mem_percent, 'var(--purple)')}
+    </div>
+    <div class="card">
+      <h3>💾 磁盘</h3>
+      <div class="val">${s.disk_percent}%</div>
+      <div class="sub">${s.disk_used_gb} / ${s.disk_total_gb} GB</div>
+      ${bar(s.disk_percent, 'var(--orange)')}
+    </div>
+    <div class="card">
+      <h3>🌐 网络</h3>
+      <div class="val" style="font-size:22px">↓${s.net_recv_mb}MB ↑${s.net_sent_mb}MB</div>
+      <div class="sub">累计流量</div>
+    </div>
+  `;
+}
+
+// ====== 日志 ======
+async function loadLogs() {
+  const resp = await fetch('/api/logs?limit=200');
+  const data = await resp.json();
+  const container = document.getElementById('logContainer');
+  container.innerHTML = '';
+  (data.logs||[]).forEach(appendLogLine);
+  scrollLog();
+}
+
+function appendLogLine(entry) {
+  const div = document.createElement('div');
+  div.className = 'log-line';
+  div.setAttribute('data-color', entry.color||'');
+  div.innerHTML = `<span class="log-time">${entry.time}</span>
+    <span class="log-src">[${entry.source}]</span>
+    <span class="log-msg">${escapeHtml(entry.content)}</span>`;
+  document.getElementById('logContainer').appendChild(div);
+  scrollLog();
+}
+
+function scrollLog() {
+  if (document.getElementById('autoScroll').checked) {
+    const c = document.getElementById('logContainer');
+    c.scrollTop = c.scrollHeight;
+  }
+}
+
+async function clearLogs() {
+  await fetch('/api/logs/clear', {method:'POST'});
+  document.getElementById('logContainer').innerHTML = '';
+}
+
+function escapeHtml(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+function loadAll() {
+  loadDash(); loadConfig(); loadPlugins(); loadStatus(); loadLogs();
+}
+
+// ====== 插件配置模态 ======
+let _curPlugin = '';
+
+async function openPluginConfig(name) {
+  _curPlugin = name;
+  const resp = await fetch('/api/plugins/'+name+'/config');
+  const data = await resp.json();
+  const schema = data.schema||{}, cfg = data.config||{};
+
+  const form = document.getElementById('pluginCfgForm');
+  form.innerHTML = Object.entries(schema).map(([k,f]) => {
+    const val = cfg[k] ?? f.default ?? '';
+    const lid = 'cfg_'+k;
+    if (f.type === 'checkbox') {
+      return `<div class="field-group check-group"><input type="checkbox" id="${lid}" name="${k}" ${val?'checked':''}><label for="${lid}">${f.label||k}</label></div>`;
+    }
+    if (f.type === 'radiobutton' && f.options) {
+      return `<div class="field-group"><label>${f.label||k}</label><div class="radio-group">`+
+        f.options.map(o=>`<label><input type="radio" name="${k}" value="${o}" ${val==o?'checked':''}> ${o}</label>`).join('')+
+        `</div></div>`;
+    }
+    if (f.type === 'dropdown' && f.options) {
+      return `<div class="field-group"><label>${f.label||k}</label><select name="${k}">`+
+        f.options.map(o=>`<option value="${o}" ${val==o?'selected':''}>${o}</option>`).join('')+
+        `</select></div>`;
+    }
+    if (f.type === 'int' || f.type === 'number') {
+      return `<div class="field-group"><label>${f.label||k}</label><input type="number" name="${k}" value="${val}"></div>`;
+    }
+    // string / text
+    return `<div class="field-group"><label>${f.label||k}</label><input type="text" name="${k}" value="${escapeHtml(String(val))}"></div>`;
+  }).join('');
+  document.getElementById('pluginCfgModal').classList.add('show');
+}
+
+function closePluginConfig() {
+  document.getElementById('pluginCfgModal').classList.remove('show');
+}
+
+async function savePluginConfig() {
+  const form = document.getElementById('pluginCfgForm');
+  const fd = new FormData(form);
+  const data = {};
+  for (const [k,v] of fd.entries()) {
+    if (v === 'on') data[k] = true;
+    else if (v === '') data[k] = false;
+    else if (!isNaN(v) && v !== '') { const f = parseFloat(v); data[k] = Number.isInteger(f) ? parseInt(v) : f; }
+    else data[k] = v;
+  }
+  const resp = await fetch('/api/plugins/'+_curPlugin+'/config', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(data)
+  });
+  const r = await resp.json();
+  const msg = document.getElementById('pluginCfgMsg');
+  if (r.ok) { msg.textContent='✅ 保存成功'; msg.style.color='var(--green)'; }
+  else { msg.textContent='❌ 保存失败: '+(r.error||''); msg.style.color='var(--red)'; }
+}
+</script>
+</body>
+</html>

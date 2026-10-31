@@ -1,0 +1,513 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>弹幕机 · DeepSeek</title>
+<style>
+  :root { --dm-size: 34px; --dm-opacity: .95; --dm-speed: 170; --dm-lanes: 8;
+    --feed-size: 16px; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden;
+    font-family: "Microsoft YaHei", "PingFang SC", system-ui, sans-serif; }
+  body { background: rgba(15,15,20,.55); }
+  body.transparent { background: transparent; }
+
+  /* ── 飘浮弹幕视图 ── */
+  #screen { position: fixed; inset: 0; overflow: hidden; }
+  body.view-feed #screen { display: none; }
+  .dm { position: absolute; left: 0; white-space: nowrap; will-change: transform;
+    font-size: var(--dm-size); line-height: 1.35; font-weight: 600;
+    opacity: var(--dm-opacity); text-shadow: 0 1px 3px rgba(0,0,0,.9),
+      0 0 2px rgba(0,0,0,.9); pointer-events: none; max-width: 92vw;
+    overflow: hidden; text-overflow: ellipsis; }
+  .dm .who { opacity: .82; }
+  .dm.chat { color: #fff; }
+  .dm.assistant_send { color: #8ee6ff; }
+  .dm.assistant_send.final { color: #58e6a8; font-size: calc(var(--dm-size) + 4px); }
+  .dm.assistant_send.loop_speech { color: #c9a7ff; }
+  .dm.tool_result { color: #b9b9c4; font-size: calc(var(--dm-size) - 12px);
+    font-weight: 400; opacity: calc(var(--dm-opacity) * .8); }
+  .dm.notice { color: #ffd58a; font-style: italic; }
+  .dm.think { color: #9aa7ff; font-size: calc(var(--dm-size) - 8px); font-weight: 400; }
+  .dm.system { color: #8a8a96; font-size: calc(var(--dm-size) - 10px); }
+  .dm .x { color: #ffb84d; margin-left: .3em; font-size: .8em; }
+
+  /* ── 信息流视图（调试台样式的滚动时间线）── */
+  #feed { display: none; position: fixed; left: 0; top: 0; bottom: 0;
+    width: min(480px, 44vw); overflow-y: auto; padding: 10px 12px 30px;
+    font-size: var(--feed-size); line-height: 1.5;
+    background: rgba(13,13,18,.62); opacity: var(--dm-opacity);
+    text-shadow: 0 1px 2px rgba(0,0,0,.85); }
+  body:not(.transparent) #feed { background: #131318; }
+  body.view-feed #feed { display: block; }
+  #feed .row { padding: 3px 8px; margin: 3px 0; border-left: 3px solid #444;
+    border-radius: 0 5px 5px 0; word-break: break-word; }
+  #feed .row.chat { border-color: #6a9a7a; color: #eee; }
+  #feed .row.assistant_send { border-color: #58e6a8; color: #8ee6c0;
+    background: rgba(40,120,80,.13); }
+  #feed .row.assistant_send.final { border-width: 4px; color: #a8f0c8; }
+  #feed .row.assistant_send.loop_speech { border-color: #c9a7ff; color: #d8c8ff; }
+  #feed .row.tool_result { border-color: #8a8a96; color: #b9b9c4; font-size: .86em; }
+  #feed .row.notice { border-color: #ffd58a; color: #ffd58a; font-style: italic; }
+  #feed .row.system { border-color: #666; color: #9a9aa4; font-size: .82em; }
+  #feed .row.model_round { border-color: #9aa7ff; }
+  #feed .who { opacity: .85; }
+  #feed .phase { font-size: .72em; padding: 0 5px; border-radius: 8px;
+    background: #2c3a50; color: #bcd; margin-right: 4px; }
+  #feed .ok { color: #7ad08a; } #feed .bad { color: #e08a8a; }
+  #feed .reasoning { color: #c0b0ee; background: rgba(90,70,140,.18);
+    border-radius: 5px; padding: 4px 7px; margin: 3px 0; font-size: .9em;
+    white-space: pre-wrap; }
+  #feed .chip { display: inline-block; background: rgba(60,60,90,.5);
+    border: 1px solid #4a4a66; border-radius: 5px; padding: 0 6px; margin: 1px 3px 1px 0;
+    font-size: .82em; font-family: monospace; }
+  #feed .rcontent { color: #d8e0ff; margin-top: 2px; }
+  #feed .ts { color: #777; font-family: monospace; font-size: .75em; margin-right: 5px; }
+
+  /* ── 设置面板 ── */
+  #ui { position: fixed; top: 10px; right: 10px; z-index: 10;
+    transition: opacity .3s; color: #eee; font-size: 13px; }
+  body.hide-ui #ui { opacity: 0; pointer-events: none; }
+  #gear { display: block; margin-left: auto; width: 34px; height: 34px;
+    border-radius: 50%; border: 1px solid #555; background: rgba(30,30,38,.85);
+    color: #eee; font-size: 17px; cursor: pointer; }
+  #panel { display: none; margin-top: 6px; padding: 12px 14px; width: 300px;
+    background: rgba(24,24,30,.94); border: 1px solid #444; border-radius: 10px;
+    line-height: 2; backdrop-filter: blur(4px); }
+  #panel.open { display: block; }
+  #panel label { display: block; white-space: nowrap; }
+  #panel input[type=number] { width: 70px; }
+  #panel input[type=range] { width: 130px; vertical-align: middle; }
+  #panel input[type=text] { width: 100%; }
+  .seg { display: flex; border: 1px solid #555; border-radius: 6px; overflow: hidden;
+    margin-bottom: 4px; }
+  .seg button { flex: 1; background: #26262e; color: #aaa; border: 0; padding: 5px 0;
+    cursor: pointer; font-size: 12px; }
+  .seg button.on { background: #3d7dff; color: #fff; }
+  #status { font-family: monospace; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+    background: #e05656; margin-right: 5px; }
+  .dot.on { background: #5fd07a; }
+  #tokenMask { position: fixed; inset: 0; z-index: 20; display: flex;
+    align-items: center; justify-content: center;
+    background: rgba(10,10,14,.8); }
+  #tokenMask .box { width: 360px; padding: 22px; background: #202028;
+    border: 1px solid #444; border-radius: 12px; color: #eee; }
+  #tokenMask input { width: 100%; margin: 10px 0; padding: 7px;
+    background: #111; border: 1px solid #555; color: #eee; border-radius: 6px; }
+  #tokenMask button { padding: 7px 18px; border: 0; border-radius: 6px;
+    background: #3d7dff; color: #fff; cursor: pointer; }
+  #tokenMask .hint { color: #9a9aa4; font-size: 12px; margin-top: 10px; }
+</style>
+</head>
+<body>
+<div id="screen"></div>
+<div id="feed"></div>
+
+<div id="tokenMask">
+  <div class="box">
+    <b>弹幕机 · 实时事件订阅</b>
+    <input id="tokenInput" type="password" placeholder="粘贴触发 token（trigger_token）" autocomplete="off">
+    <button id="tokenOk">连接</button>
+    <div class="hint">token 仅保存在本浏览器 localStorage；OBS 可直接用 URL 参数
+      ?token=xxx&amp;bg=transparent&amp;view=feed</div>
+  </div>
+</div>
+
+<div id="ui">
+  <button id="gear" title="设置">⚙</button>
+  <div id="panel">
+    <div id="status"><span class="dot"></span><span id="statusText">未连接</span></div>
+    <hr style="border-color:#444;margin:6px 0">
+    <div class="seg">
+      <button id="viewFloat" type="button">飘浮弹幕</button>
+      <button id="viewFeed" type="button">信息流</button>
+    </div>
+    <label><input type="checkbox" data-cat="chat" checked> 群聊消息</label>
+    <label><input type="checkbox" data-cat="assistant_send" checked> AI 发言</label>
+    <label><input type="checkbox" data-cat="tool_result" checked> 工具动作</label>
+    <label><input type="checkbox" data-cat="notice" checked> 长跑通知</label>
+    <label id="thinkFloatRow"><input type="checkbox" data-cat="think" checked> 💭 思考标记（飘字）</label>
+    <label id="thinkFeedRow" style="display:none"><input type="checkbox" id="showThinking"> 显示思考信息（思考链全文）</label>
+    <label><input type="checkbox" data-cat="system"> 闸门/压缩/插队等系统事件</label>
+    <hr style="border-color:#444;margin:6px 0">
+    <label>群号过滤（逗号分隔，空=全部）
+      <input type="text" id="groups" placeholder="如 123456,789012"></label>
+    <div id="floatOpts">
+      <label>速度 <input type="range" id="speed" min="60" max="420" step="10" value="170">
+        <span id="speedV">170</span> px/s</label>
+      <label>轨道数 <input type="number" id="lanes" min="2" max="20" value="8"></label>
+    </div>
+    <label>字号 <input type="range" id="size" min="14" max="64" step="1" value="34">
+      <span id="sizeV">34</span></label>
+    <label>不透明度 <input type="range" id="opacity" min="30" max="100" step="1" value="95">
+      <span id="opacityV">95</span>%</label>
+  </div>
+</div>
+
+<script>
+'use strict';
+const $ = s => document.querySelector(s);
+const qs = new URLSearchParams(location.search);
+const LS = {
+  get(k, d) { try { const v = localStorage.getItem('live_dm_' + k);
+    return v === null ? d : v; } catch (e) { return d; } },
+  set(k, v) { try { localStorage.setItem('live_dm_' + k, v); } catch (e) {} }
+};
+if (qs.get('bg') === 'transparent') document.body.classList.add('transparent');
+
+const state = { token: qs.get('token') || LS.get('token', ''), es: null,
+  lanes: [], laneUsed: [], merged: new Map(),
+  view: qs.get('view') === 'feed' ? 'feed' : LS.get('view', 'float'),
+  showThinking: LS.get('show_thinking', '0') === '1',
+  events: [], follow: true };
+
+function humanizeCQ(s) {
+  if (!s) return '';
+  return s
+    .replace(/\[CQ:reply[^\]]*\]/g, '')
+    .replace(/\[CQ:at,qq=([^,\]]+)[^\]]*\]/g, '@$1')
+    .replace(/\[CQ:image[^\]]*\]/g, '[图片]')
+    .replace(/\[CQ:forward[^\]]*\]/g, '[合并转发]')
+    .replace(/\[CQ:record[^\]]*\]/g, '[语音]')
+    .replace(/\[CQ:video[^\]]*\]/g, '[视频]')
+    .replace(/\[CQ:file[^\]]*\]/g, '[文件]')
+    .replace(/\[CQ:face,id=(\d+)[^\]]*\]/g, '[表情]')
+    .replace(/\[CQ:[^\]]+\]/g, '');
+}
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"]/g, c =>
+    ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
+}
+function catOn(cat) {
+  const el = document.querySelector(`input[data-cat="${cat}"]`);
+  return !el || el.checked;
+}
+function groupOk(gid) {
+  const g = $('#groups').value.replace(/\s/g, '');
+  return !g || g.split(',').includes(String(gid));
+}
+function nowStr(ts) { return new Date(ts * 1000).toTimeString().slice(0, 8); }
+
+// ── 视图切换 ──────────────────────────────────────────────────
+function setView(v) {
+  state.view = v;
+  document.body.classList.toggle('view-feed', v === 'feed');
+  $('#viewFloat').classList.toggle('on', v === 'float');
+  $('#viewFeed').classList.toggle('on', v === 'feed');
+  $('#thinkFloatRow').style.display = v === 'float' ? 'block' : 'none';
+  $('#thinkFeedRow').style.display = v === 'feed' ? 'block' : 'none';
+  $('#floatOpts').style.display = v === 'float' ? 'block' : 'none';
+  LS.set('view', v);
+  if (v === 'feed') renderFeedAll();
+}
+$('#viewFloat').onclick = () => setView('float');
+$('#viewFeed').onclick = () => setView('feed');
+
+// ── 飘浮弹幕 ──────────────────────────────────────────────────
+function pickLane() {
+  const n = Math.max(2, +$('#lanes').value || 8);
+  while (state.lanes.length < n) { state.lanes.push(0); state.laneUsed.push(0); }
+  if (state.lanes.length > n) { state.lanes.length = n; state.laneUsed.length = n; }
+  const now = performance.now();
+  let best = 0;
+  for (let i = 0; i < n; i++) {
+    if (state.lanes[i] <= now) { best = i; break; }
+    if (state.laneUsed[i] < state.laneUsed[best]) best = i;
+  }
+  return best;
+}
+
+function shoot(html, cls, mergeKey) {
+  if (mergeKey) {
+    const m = state.merged.get(mergeKey);
+    if (m && performance.now() < m.until) {
+      m.count++;
+      m.badge.textContent = '×' + m.count;
+      m.until = performance.now() + 3000;
+      return;
+    }
+  }
+  const el = document.createElement('div');
+  el.className = 'dm ' + cls;
+  el.innerHTML = html;
+  const lane = pickLane();
+  const vh = innerHeight, vw = innerWidth;
+  el.style.top = (lane * (vh / state.lanes.length) + 4) + 'px';
+  $('#screen').appendChild(el);
+  const w = el.offsetWidth;
+  const speed = +$('#speed').value;
+  const dur = (vw + w) / speed * 1000;
+  state.lanes[lane] = performance.now() + dur * (w / (vw + w));
+  state.laneUsed[lane] = performance.now();
+  const anim = el.animate(
+    [{ transform: `translateX(${vw}px)` }, { transform: `translateX(${-w - 20}px)` }],
+    { duration: dur, easing: 'linear' });
+  anim.onfinish = () => el.remove();
+  if (mergeKey) {
+    const badge = document.createElement('span');
+    badge.className = 'x';
+    el.appendChild(badge);
+    state.merged.set(mergeKey, { count: 1, badge, until: performance.now() + 3000 });
+  }
+}
+
+function onFloat(ev) {
+  switch (ev.kind) {
+    case 'chat':
+      if (!catOn('chat')) return;
+      shoot(`<span class="who">${esc(ev.sender_name || ev.sender_id || '有人')}：</span>${mediaText(ev)}`,
+            'chat', ev.sender_id + '|' + ev.text);
+      break;
+    case 'assistant_send':
+      if (!catOn('assistant_send')) return;
+      shoot(`<span class="who">${ev.phase === 'final' ? '她：' : ''}</span>${esc(humanizeCQ(ev.text))}`,
+            'assistant_send ' + (ev.phase || ''), null);
+      break;
+    case 'tool_result':
+      if (!catOn('tool_result')) return; {
+        let brief = '';
+        try { brief = JSON.stringify(ev.arguments || {}); } catch (e) {}
+        if (brief.length > 40) brief = brief.slice(0, 40) + '…';
+        shoot(`🔧 ${esc(ev.name)} ${esc(brief)}${ev.ok ? '' : ' ❌'}`,
+              'tool_result', null);
+      } break;
+    case 'notice':
+      if (!catOn('notice')) return;
+      shoot(`🏃 ${esc((ev.text || '').split('\n')[0])}`, 'notice', null);
+      break;
+    case 'model_round':
+      if (!catOn('think') || !ev.reasoning) return;
+      shoot(`💭 思考中…（第 ${(ev.round || 0) + 1} 轮）`, 'think', 'think');
+      break;
+    case 'gate':
+      if (!catOn('system')) return;
+      shoot(`🚧 消息未触发回复（${ev.stage === 'judge' ? '判官' : '粗筛'}）`, 'system', null);
+      break;
+    case 'prompt':
+      if (!catOn('system')) return;
+      shoot(`📥 插话进模型：${esc(ev.sender_name || '')} ${esc(humanizeCQ(ev.text)).slice(0, 40)}`,
+            'system', null);
+      break;
+    case 'compact':
+      if (!catOn('system')) return;
+      shoot(`🗜 上下文自动压缩（${ev.head_msgs} → ${ev.chars}字纪要）`, 'system', null);
+      break;
+  }
+}
+
+function mediaText(ev) {
+  if (ev.text) return esc(humanizeCQ(ev.text));
+  const names = { image: '[图片]', record: '[语音]', file: '[文件]', video: '[视频]' };
+  return (ev.media || []).map(k => names[k] || '[' + esc(k) + ']').join('');
+}
+
+// ── 信息流（时间线）──────────────────────────────────────────
+const PHASE_CN = { interim: '边干边说', final: '终态回复', loop_speech: '长跑汇报' };
+
+function feedRow(ev) {
+  let cls = ev.kind, html = `<span class="ts">${nowStr(ev.ts)}</span>`;
+  switch (ev.kind) {
+    case 'chat':
+      if (!catOn('chat')) return null;
+      html += `<span class="who">${esc(ev.sender_name || ev.sender_id || '有人')}：</span>${mediaText(ev)}`
+        + (ev.at_me ? ' <span class="chip">@她</span>' : '')
+        + (ev.reply ? ' <span class="chip">回复</span>' : '')
+        + (ev.has_media ? ' 📎' : '');
+      break;
+    case 'assistant_send':
+      if (!catOn('assistant_send')) return null;
+      cls += ' ' + (ev.phase || '');
+      html += `<span class="phase">${esc(PHASE_CN[ev.phase] || ev.phase || '')}</span>${
+        esc(humanizeCQ(ev.text))}`;
+      break;
+    case 'tool_result': {
+      if (!catOn('tool_result')) return null;
+      let brief = '';
+      try { brief = JSON.stringify(ev.arguments || {}); } catch (e) {}
+      if (brief.length > 60) brief = brief.slice(0, 60) + '…';
+      const detail = esc(typeof ev.result === 'string' ? ev.result : '');
+      html += `🔧 <b>${esc(ev.name)}</b> ${esc(brief)} `
+        + `<span class="${ev.ok ? 'ok' : 'bad'}">${ev.ok ? '✓' : '✗'}</span>`
+        + (detail ? `<div style="opacity:.7;font-size:.9em">${detail.slice(0, 300)}</div>` : '');
+      break;
+    }
+    case 'notice':
+      if (!catOn('notice')) return null;
+      html += `🏃 ${esc((ev.text || '').replace(/\n/g, ' ⏎ '))}`;
+      break;
+    case 'model_round':
+      // 信息流里模型轮次默认不显示（思考链/正文都已由其他事件体现）；
+      // 勾选「显示思考信息」后展示思考链全文 + 工具调用 + 本轮正文
+      if (!state.showThinking) return null;
+      if (ev.note) html += `<span class="phase">${esc(ev.note)}</span>`;
+      html += `<span class="chip">第 ${(ev.round || 0) + 1} 轮</span>`;
+      (ev.tool_calls || []).forEach(tc =>
+        html += `<span class="chip">🔧 ${esc(tc.name)}</span>`);
+      if (ev.reasoning)
+        html += `<div class="reasoning">💭 ${esc(ev.reasoning)}</div>`;
+      if (ev.content)
+        html += `<div class="rcontent">${esc(ev.content)}</div>`;
+      if (!ev.reasoning && !ev.content && !(ev.tool_calls || []).length)
+        return null;
+      break;
+    case 'gate':
+      if (!catOn('system')) return null;
+      html += `🚧 未触发回复（${ev.stage === 'judge' ? '判官' : '粗筛'}）${
+        ev.reason ? '：' + esc(ev.reason) : ''}`;
+      break;
+    case 'prompt':
+      if (!catOn('system')) return null;
+      html += `📥 <b>${esc(ev.sender_name || '')}</b> 插话进模型：${esc(humanizeCQ(ev.text))}`;
+      break;
+    case 'compact':
+      if (!catOn('system')) return null;
+      html += `🗜 上下文压缩：${ev.head_msgs} 条旧消息 → ${ev.chars} 字纪要`;
+      break;
+    default:
+      return null;
+  }
+  return { cls, html };
+}
+
+function appendFeed(ev) {
+  const r = feedRow(ev);
+  if (!r) return;
+  const el = document.createElement('div');
+  el.className = 'row ' + r.cls;
+  el.innerHTML = r.html;
+  const feed = $('#feed');
+  const stick = state.follow;
+  feed.appendChild(el);
+  while (feed.childNodes.length > 400) feed.removeChild(feed.firstChild);
+  if (stick) feed.scrollTop = feed.scrollHeight;
+}
+$('#feed').addEventListener('scroll', () => {
+  const f = $('#feed');
+  state.follow = f.scrollHeight - f.scrollTop - f.clientHeight < 60;
+});
+function renderFeedAll() {
+  const feed = $('#feed');
+  feed.innerHTML = '';
+  state.events.forEach(ev => {
+    const r = feedRow(ev);
+    if (!r) return;
+    const el = document.createElement('div');
+    el.className = 'row ' + r.cls;
+    el.innerHTML = r.html;
+    feed.appendChild(el);
+  });
+  feed.scrollTop = feed.scrollHeight;
+  state.follow = true;
+}
+
+// ── 事件入口 ──────────────────────────────────────────────────
+function onEvent(ev) {
+  state.events.push(ev);
+  if (state.events.length > 600) state.events.shift();
+  if (state.view === 'feed') appendFeed(ev);
+  else onFloat(ev);
+}
+
+function setStatus(on, text) {
+  $('.dot').classList.toggle('on', on);
+  $('#statusText').textContent = text;
+}
+
+function connect() {
+  if (state.es) { state.es.close(); state.es = null; }
+  if (!state.token) return;
+  const p = new URLSearchParams({ token: state.token });
+  const g = $('#groups').value.replace(/\s/g, '');
+  if (g) p.set('groups', g);
+  const es = new EventSource('/live/events?' + p.toString());
+  state.es = es;
+  ['chat', 'gate', 'turn_start', 'prompt', 'model_round', 'tool_result',
+   'assistant_send', 'compact', 'notice', 'turn_end', 'meta']
+    .forEach(k => es.addEventListener(k, e => {
+      try {
+        const ev = JSON.parse(e.data);
+        ev.kind = k;
+        if (k === 'meta') {
+          if (ev.hello) {
+            const scope = (ev.groups && ev.groups.length)
+              ? ev.groups.join(',') : '全部群';
+            setStatus(true, `已连接 · 监听 ${scope}`);
+          } else {
+            setStatus(true, '已连接（有丢帧，显示可能不完整）');
+          }
+        }
+        if (groupOk(ev.group_id)) onEvent(ev);
+      } catch (err) {}
+    }));
+  es.onopen = () => setStatus(true, '已连接（等待事件…）');
+  es.onerror = () => setStatus(false, '连接断开，自动重连中…');
+}
+
+// ── token 弹框 ────────────────────────────────────────────────
+if (state.token) $('#tokenMask').style.display = 'none';
+$('#tokenOk').onclick = () => {
+  state.token = $('#tokenInput').value.trim();
+  if (!state.token) return;
+  LS.set('token', state.token);
+  $('#tokenMask').style.display = 'none';
+  connect();
+};
+$('#tokenInput').onkeydown = e => { if (e.key === 'Enter') $('#tokenOk').click(); };
+
+// ── 设置面板 ──────────────────────────────────────────────────
+$('#gear').onclick = () => $('#panel').classList.toggle('open');
+let hideTimer;
+function pokeUI() {
+  document.body.classList.remove('hide-ui');
+  clearTimeout(hideTimer);
+  hideTimer = setTimeout(() => {
+    if (!$('#panel').classList.contains('open'))
+      document.body.classList.add('hide-ui');
+  }, qs.get('bg') === 'transparent' ? 1800 : 8000);
+}
+addEventListener('mousemove', pokeUI);
+pokeUI();
+
+const bindRange = (id, key, suffix, apply) => {
+  const el = $('#' + id);
+  el.value = LS.get(key, el.value);
+  const show = $('#' + id + 'V');
+  const upd = () => { show.textContent = el.value + suffix; apply(el.value);
+    LS.set(key, el.value); };
+  el.oninput = upd; upd();
+};
+bindRange('size', 'size', '', v => {
+  document.documentElement.style.setProperty('--dm-size', v + 'px');
+  document.documentElement.style.setProperty('--feed-size',
+    Math.max(14, Math.round(v * 0.47)) + 'px');
+});
+bindRange('speed', 'speed', '', () => {});
+bindRange('opacity', 'opacity', '', v =>
+  document.documentElement.style.setProperty('--dm-opacity', v / 100));
+$('#lanes').value = LS.get('lanes', 8);
+$('#lanes').onchange = e => LS.set('lanes', e.target.value);
+const gEl = $('#groups');
+gEl.value = qs.get('groups') || LS.get('groups', '');
+gEl.onchange = () => { LS.set('groups', gEl.value); connect(); };
+document.querySelectorAll('input[data-cat]').forEach(cb => {
+  const saved = LS.get('cat_' + cb.dataset.cat, cb.checked ? '1' : '0');
+  cb.checked = saved === '1';
+  cb.onchange = () => {
+    LS.set('cat_' + cb.dataset.cat, cb.checked ? '1' : '0');
+    if (state.view === 'feed') renderFeedAll();
+  };
+});
+$('#showThinking').checked = state.showThinking;
+$('#showThinking').onchange = e => {
+  state.showThinking = e.target.checked;
+  LS.set('show_thinking', state.showThinking ? '1' : '0');
+  renderFeedAll();
+};
+
+setView(state.view);
+if (state.token) connect();
+</script>
+</body>
+</html>
