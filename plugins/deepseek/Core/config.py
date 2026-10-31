@@ -9,9 +9,9 @@ import re
 
 # ── 多提供商模型路由 ──────────────────────────────────────────────
 # 路由值统一写 "服务商id/模型id"（按第一个 '/' 切分，模型 id 自身可含 '/'）。
-DEFAULT_PROVIDER_ID = "default"
-DEFAULT_BASE_URL = "https://ark.cn-beijing.volces.com/api/coding/v3"
-DEFAULT_MODEL_ID = "deepseek-v4.1-flash"
+DEFAULT_PROVIDER_ID = "deepseek"
+DEFAULT_BASE_URL = "https://api.deepseek.com"
+DEFAULT_MODEL_ID = "deepseek-flash"
 _DEFAULT_ROUTE = f"{DEFAULT_PROVIDER_ID}/{DEFAULT_MODEL_ID}"
 # 六个可独立选模型的路由：主对话 + 五个后台任务（全部全局；仅 model 可按群覆盖）
 ROUTE_KEYS = ("model", "judge_model", "summary_model", "extract_model",
