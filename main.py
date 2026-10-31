@@ -119,9 +119,12 @@ async def connect_and_run(no_gui=False):
                 if enable_web:
                     # 启动 Web 管理面板（host/port 都可在 config.json 或面板「配置」页改，重启生效）
                     from ui.web.server import start_web_server, web_logger
+                    # 面板密码优先用 web_admin_token；未配置时回退到 WS token（旧配置兼容）
+                    web_token = (configs.conf.get("web_admin_token")
+                                 or configs.conf.get("token", "test"))
                     start_web_server(
                         host=web_host, port=web_port,
-                        token=configs.conf.get("token", "test")
+                        token=web_token
                     )
                     print(f"[系统] Web 管理面板已启动: http://{web_host}:{web_port}")
                     bot_logger = logger(web_logger)

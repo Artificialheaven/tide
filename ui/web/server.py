@@ -102,7 +102,7 @@ def api_check_auth():
 #  路由：配置
 # ============================================================
 SECRET_MASK = '********'
-_SECRET_KEYS = ('official_app_secret',)
+_SECRET_KEYS = ('official_app_secret', 'web_admin_token')
 
 
 @_app.route("/api/config", methods=["GET"])
@@ -126,7 +126,7 @@ def _validate_config_update(data: dict) -> tuple[dict, str]:
         if key in _SECRET_KEYS and value == SECRET_MASK:
             # 前端回传的是掩码值，表示「不修改」，不能覆盖真实密钥
             continue
-        if key == 'official_app_secret':
+        if key in _SECRET_KEYS:
             clean[key] = str(value or '').strip()
         elif key == 'transport':
             transport = str(value or '').strip().lower()

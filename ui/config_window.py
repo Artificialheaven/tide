@@ -9,6 +9,7 @@ def save_config(sender, app_data, user_data):
     show_heartbeat = dpg.get_value("show_heartbeat")
     ws_address = dpg.get_value("ws_address")
     token = dpg.get_value("token")
+    web_admin_token = str(dpg.get_value("web_admin_token")).strip()
     transport = str(dpg.get_value("transport")).strip().lower()
     official_app_id = str(dpg.get_value("official_app_id")).strip()
     official_app_secret = str(dpg.get_value("official_app_secret")).strip()
@@ -20,6 +21,7 @@ def save_config(sender, app_data, user_data):
     configs.conf["show_heartbeat"] = show_heartbeat
     configs.conf["ws_address"] = ws_address
     configs.conf["token"] = token
+    configs.conf["web_admin_token"] = web_admin_token
     configs.conf["transport"] = transport
     configs.conf["official_app_id"] = official_app_id
     configs.conf["official_app_secret"] = official_app_secret
@@ -35,7 +37,7 @@ def create_config_window():
     with dpg.window(
             label="框架配置",
             width=420,
-            height=560,
+            height=620,
             tag="config_window",
             pos=[200, 50],
             on_close=lambda: dpg.hide_item("config_window")
@@ -65,13 +67,25 @@ def create_config_window():
         dpg.add_spacer(height=10)
 
         # Token令牌输入框
-        dpg.add_text("Token令牌:")
+        dpg.add_text("WS Token令牌:")
         dpg.add_input_text(
             default_value=configs.conf.get("token", ""),
             width=300,
             tag="token",
             password=True,
             hint="请输入访问令牌..."
+        )
+
+        dpg.add_spacer(height=10)
+
+        # Web 管理面板密码（与 WS Token 分开）
+        dpg.add_text("Web 面板密码:")
+        dpg.add_input_text(
+            default_value=configs.conf.get("web_admin_token", ""),
+            width=300,
+            tag="web_admin_token",
+            password=True,
+            hint="留空则沿用 WS Token..."
         )
 
         dpg.add_spacer(height=10)

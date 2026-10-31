@@ -366,7 +366,8 @@ async function loadConfig() {
   const fields = [
     {key:'show_heartbeat',label:'显示心跳',type:'checkbox'},
     {key:'ws_address',label:'WebSocket 地址'},
-    {key:'token',label:'Token'},
+    {key:'token',label:'WS Token'},
+    {key:'web_admin_token',label:'Web 面板登录密码（留空则沿用 WS Token）',type:'password'},
     {key:'use_plugin_venv',label:'插件独立环境',type:'checkbox'},
     {key:'max_reconnect_attempts',label:'最大重连次数 (0=无限)'},
     {key:'reconnect_base_delay',label:'重连初始延迟(秒)'},
@@ -379,6 +380,10 @@ async function loadConfig() {
     if (f.type === 'checkbox') {
       return `<div class="form-group"><label>${f.label}</label>
         <input type="checkbox" name="${f.key}" ${cfg[f.key]?'checked':''} style="width:auto"></div>`;
+    }
+    if (f.type === 'password') {
+      return `<div class="form-group"><label>${f.label}</label>
+        <input type="password" name="${f.key}" value="${cfg[f.key]??''}"></div>`;
     }
     return `<div class="form-group"><label>${f.label}</label>
       <input name="${f.key}" value="${cfg[f.key]??''}"></div>`;

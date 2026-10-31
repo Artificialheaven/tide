@@ -8,7 +8,7 @@
 {
     "enable_web_admin": true,
     "web_admin_port": 8081,
-    "token": "你的密码"
+    "web_admin_token": "你的面板密码"
 }
 ```
 
@@ -16,7 +16,10 @@
 
 ## 登录
 
-输入 `config.json` 中 `token` 的值作为密码，无需用户名。Session 有效期 24 小时。
+输入 `config.json` 中 `web_admin_token` 的值作为密码，无需用户名。Session 有效期 24 小时。
+
+`web_admin_token` 与 OneBot WS 的 `token` 是**两个独立配置**；`web_admin_token` 留空时
+回退使用 `token`（兼容旧配置）。密码在启动时读入，修改后需重启程序生效。
 
 ## 功能页面
 
@@ -26,7 +29,7 @@ Bot ID、消息收发统计、WebSocket 连接状态，每 3 秒自动刷新。
 
 ### ⚙️ 配置
 
-修改全局配置（WebSocket 地址、Token、心跳显示、重连参数、Web 面板开关等），保存后需重启生效。
+修改全局配置（WebSocket 地址、WS Token、Web 面板密码、心跳显示、重连参数、Web 面板开关等），保存后需重启生效。
 
 ### 🔌 插件
 

@@ -22,6 +22,8 @@ default_config = {
     "enable_web_admin": False,
     "web_admin_host": "0.0.0.0",
     "web_admin_port": 8081,
+    # Web 管理面板登录密码；留空则回退使用 token（旧配置兼容）
+    "web_admin_token": "",
     "plugin_venv_python_version": "auto",
     "max_reconnect_attempts": 0,
     "reconnect_base_delay": 2,
