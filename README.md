@@ -1,4 +1,4 @@
-# NapCatBot — QQ 机器人框架
+# Tide — QQ 机器人框架
 
 基于 **OneBot 协议** 的现代化 QQ 机器人框架，支持插件化扩展、图形化管理界面、Web 远程管理和自动断线重连。
 
@@ -34,7 +34,7 @@ python main.py -nogui   # 无头模式
 ## 项目结构
 
 ```
-napcatbot/
+tide/
 ├── main.py                 # 入口
 ├── configs.py              # 配置管理
 ├── config.json             # 用户配置

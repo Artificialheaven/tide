@@ -3,7 +3,7 @@
     "ws_address": "ws://localhost:8080",
     "token": "",
     "use_plugin_venv": true,
-    "enable_web_admin": false,
+    "enable_web_admin": true,
     "web_admin_host": "0.0.0.0",
     "web_admin_port": 8081,
     "plugin_venv_python_version": "auto",
