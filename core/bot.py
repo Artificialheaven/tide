@@ -86,14 +86,16 @@ class bot:
         """获取消息统计信息"""
         return self._stats.get_stats()
 
-    async def send_message(self, message, target_id=None, message_type="private", plugin_name=None):
+    async def send_message(self, message, target_id=None, message_type="private", plugin_name=None, extra=None):
         """
         发送消息
-        
+
         :param message: 发送的消息内容
         :param target_id: 发送的目标ID（用户ID或群ID）
         :param message_type: private（私聊）或 group（群聊）
         :param plugin_name: 插件名称（可选），用于在日志中显示来源
+        :param extra: 附加 action 参数（如下划线前缀的通道扩展参数，
+            NapCat 会忽略未知参数，official 适配层消费 _official_* 参数）
         :return: 服务端的响应数据
         """
         echo = self._generate_echo()
@@ -119,7 +121,12 @@ class bot:
                 params["user_id"] = target_id
             elif message_type == "group":
                 params["group_id"] = target_id
-            
+
+            # 通道扩展参数（如 official 的 _official_msg_id/_official_user_id）
+            for key, value in (extra or {}).items():
+                if value not in (None, ""):
+                    params[key] = value
+
             # 发送消息 - 使用正确的JSON格式
             data = {
                 "action": "send_msg",

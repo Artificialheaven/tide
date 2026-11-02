@@ -859,6 +859,51 @@ def set_summary(db_path: str, group_id, summary: str, covered_up_to_id: int,
         conn.close()
 
 
+def advance_summary(db_path: str, group_id, summary: str,
+                    covered_up_to_id: int, persona_hash: str) -> bool:
+    """增量摘要落库：锚点只进不退，防止旧快照晚到把 covered_up_to_id 写小
+    （写小会导致同批历史被反复摘要、前缀缓存反复断裂）。
+
+    人设哈希变化时允许重写（_rebuild_summary 走 set_summary，不经这里）。
+    返回是否实际写入；False=库内已有更新的锚点（竞争落败），调用方应重读。
+    """
+    conn = connect(db_path)
+    try:
+        cur = conn.execute(
+            'INSERT INTO summaries (group_id, summary, covered_up_to_id, '
+            'persona_hash, updated_at) VALUES (?,?,?,?,?) '
+            'ON CONFLICT(group_id) DO UPDATE SET summary=excluded.summary, '
+            'covered_up_to_id=excluded.covered_up_to_id, '
+            'persona_hash=excluded.persona_hash, updated_at=excluded.updated_at '
+            'WHERE excluded.covered_up_to_id > summaries.covered_up_to_id '
+            'OR excluded.persona_hash != summaries.persona_hash',
+            (str(group_id), summary, int(covered_up_to_id), persona_hash,
+             time.time()))
+        conn.commit()
+        return (cur.rowcount or 0) > 0
+    finally:
+        conn.close()
+
+
+def advance_summary_anchor(db_path: str, group_id, up_to_id: int) -> bool:
+    """硬截尾模式：只把锚点前移到 up_to_id，不调 LLM、不动摘要文本与人设
+    哈希（切回摘要模式时旧摘要仍可滚动续用）。锚点同样只进不退。"""
+    conn = connect(db_path)
+    try:
+        cur = conn.execute(
+            'INSERT INTO summaries (group_id, summary, covered_up_to_id, '
+            'persona_hash, updated_at) VALUES (?,?,?,\'\',?) '
+            'ON CONFLICT(group_id) DO UPDATE SET '
+            'covered_up_to_id=excluded.covered_up_to_id, '
+            'updated_at=excluded.updated_at '
+            'WHERE excluded.covered_up_to_id > summaries.covered_up_to_id',
+            (str(group_id), '', int(up_to_id), time.time()))
+        conn.commit()
+        return (cur.rowcount or 0) > 0
+    finally:
+        conn.close()
+
+
 # ── 工具勾选 DAL ─────────────────────────────────────────────────
 
 def get_tool_overrides(db_path: str, group_id) -> dict:

@@ -57,6 +57,7 @@ main.py
 | `official_self_id` | `""` | 空则用 AppID 作为 OneBot `self_id` |
 | `official_bot_name` | `QQ官方机器人` | `get_login_info` 拿不到昵称时的降级名 |
 | `official_allow_active` | `false` | 被动名额耗尽后是否允许发主动消息 |
+| `official_passive_pool_on` | `true` | 被动 msg_id 池开关；`false` 时一轮回复固定使用触发消息的 id，不借用池内其他消息 |
 | `official_at_all_mode` | `native` | `[CQ:at,qq=all]`：`native` 用 `<qqbot-at-everyone/>`，`text` 降级为文本，`drop` 丢弃 |
 | `official_passive_window_seconds` | `295` | 被动回复有效期（官方约 5 分钟） |
 | `official_max_passive_seq` | `5` | 每个 `msg_id` 的最大被动回复条数 |
@@ -105,20 +106,32 @@ main.py
 ### 被动回复池
 
 官方限制是「每条入站消息最多 **5 条**被动回复，约 5 分钟有效」。适配层按群维护一个
-近期入站 `msg_id` 池：
+近期入站 `msg_id` 池（每个槽位记录发送人 `user_id`）：
 
-1. 每条 `GROUP_AT_MESSAGE_CREATE` 入池（去重，按过期时间清理，每群上限
+1. 每条 `GROUP_AT_MESSAGE_CREATE` 连同发送人一起入池（去重，按过期时间清理，每群上限
    `official_passive_pool_size`）。
-2. 发送时优先使用 CQ 里 `[CQ:reply,id=X]` 指定的消息；否则挑**最早到期且未用完**
-   的槽位（FIFO），先把快过期的名额用掉。
-3. 槽位内 `msg_seq` 从 1 递增到 `official_max_passive_seq`；用完后自动换池内下一条
-   消息，所以群里有近期发言时，单轮回复可以明显超过 5 条。
+2. 发送选 id 的优先级：
+   1. CQ `[CQ:reply,id=X]` 或发送参数 `_official_msg_id` 显式指定的消息；
+   2. 本群当前**粘住**的 id——该 id 名额没用完绝不换 id；
+   3. 需要换 id 时，优先「目标用户」（`_official_user_id`，缺省取池内最新消息的
+      发送人，通常就是本轮触发者）自己的入站消息，多条时先烧最快过期的；
+   4. 开池（默认）再不够才 FIFO 借用池内任何人的 id；**关池**
+      （`official_passive_pool_on=false`）则不借用其他消息，直接判定名额耗尽。
+3. 槽位内 `msg_seq` 从 1 递增到 `official_max_passive_seq`；开池时用完自动换同用户/
+   池内下一条消息，群里有近期发言时单轮回复可以明显超过 5 条；关池时一轮回复锁死
+   在触发消息上。
 4. 同群发送在同一把 `asyncio.Lock` 内完成，避免并发抢同一个 `msg_seq`；跨群绝不
    混用槽位。
 5. 池耗尽默认返回 `failed` 并带 `data.sent_count`（已发条数）；开启
    `official_allow_active=true` 后改用主动消息继续发。
 
-安静群（近期只有本次触发的那一条 @）仍会撞到 5 条上限——这是官方能力边界。
+`_official_msg_id` / `_official_user_id` 是 `send_msg` 的下划线扩展参数，只被
+official 适配层消费（NapCat 忽略未知参数）。deepseek 插件每轮自动携带；关池时还会把
+回复按「剩余名额」均分切段（每条字数向上取整），`qq_send_text` / 图片 / 语音 / @全体
+等工具每发一条先扣 1，保证一轮不超官方上限。
+
+安静群（近期只有本次触发的那一条 @）在关池模式下仍会撞到 5 条上限；开池模式受池内
+近期消息总数限制——这是官方能力边界。
 
 ## 支持的 action
 

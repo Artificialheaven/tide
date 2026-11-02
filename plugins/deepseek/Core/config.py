@@ -58,6 +58,10 @@ DEFAULTS = {
     "summary_min_interval_sec": 600,     # 软阈值：距上次摘要的最短间隔
     "summary_force_msgs": 48,            # 硬阈值：积压超过就无视间隔立即摘要
     "summary_force_chars": 12000,        # 硬阈值：积压字符超过就立即摘要
+    # summary=积压调 LLM 滚摘要（省上下文、有 token 成本/前缀断点）；
+    # tail=滑窗满时零 LLM 机械截尾，只保留尾部 tail_keep_msgs 条（最省、前缀最稳）
+    "summary_mode": "summary",
+    "tail_keep_msgs": 30,                # tail 模式：机械保留的尾部消息条数
     "ambient_context_on": True,           # 触发对话时把触发前几条未触发群聊作为背景注入
     "ambient_context_n": 8,                # 背景消息最多注入条数
 
@@ -270,6 +274,7 @@ GROUP_OVERRIDABLE = frozenset({
     "model", "enable_thinking",
     "heuristic_on", "judge_on",
     "window_rounds", "char_budget",
+    "summary_mode", "tail_keep_msgs",
     "summary_min_new_msgs", "summary_min_new_chars",
     "summary_min_interval_sec",
     "ambient_context_on", "ambient_context_n",
@@ -290,6 +295,7 @@ BUILTIN_PERSONA = "你是一个QQ群聊助手，说话简短自然，用中文�
 
 _INT_KEYS = {
     "owner_qq", "window_rounds", "char_budget", "summary_char_budget",
+    "tail_keep_msgs",
     "summary_min_new_msgs", "summary_min_new_chars",
     "summary_min_interval_sec", "summary_force_msgs", "summary_force_chars",
     "ambient_context_n",
@@ -349,6 +355,18 @@ _BOOL_KEYS = {
     "screen_on", "self_memory_trace_on", "request_notify_on",
     "loop_on", "at_only_on", "quote_reply_on",
 }
+# 枚举键 → 合法取值；非法值回退默认（全局）或上级值（群级）
+_ENUM_KEYS = {
+    "summary_mode": ("summary", "tail"),
+}
+
+
+def _as_enum(v, allowed, default):
+    if isinstance(v, str) and v.strip() in allowed:
+        return v.strip()
+    return default
+
+
 def _as_int(v, default):
     try:
         if isinstance(v, bool):
@@ -551,6 +569,8 @@ def merge_config(raw: dict | None) -> dict:
             cfg[k] = _as_int(v, DEFAULTS[k])
         elif k in _BOOL_KEYS:
             cfg[k] = _as_bool(v, DEFAULTS[k])
+        elif k in _ENUM_KEYS:
+            cfg[k] = _as_enum(v, _ENUM_KEYS[k], DEFAULTS[k])
         else:
             cfg[k] = v
     # 多提供商：先规范化服务商，再校验六个路由（非法重置；裸 id 限定化）
@@ -585,6 +605,8 @@ def resolve_group(cfg: dict, group_settings: dict | None) -> dict:
                 eff[k] = _as_int(v, cfg[k])
             elif k in _BOOL_KEYS:
                 eff[k] = _as_bool(v, cfg[k])
+            elif k in _ENUM_KEYS:
+                eff[k] = _as_enum(v, _ENUM_KEYS[k], cfg[k])
             elif k == "model":
                 # qualified 或 default 服务商声明过的裸 id 才生效，否则回退全局
                 if isinstance(v, str) and is_valid_route_value(eff, v):

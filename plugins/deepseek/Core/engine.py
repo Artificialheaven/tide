@@ -10,7 +10,8 @@ import re
 import time
 import uuid
 
-from . import builtin_tools, context as ctx_mod, media_in, prompts as prompts_mod, reply, storage
+from . import (builtin_tools, context as ctx_mod, media_in, passive_turn,
+               prompts as prompts_mod, reply, storage)
 from .builtin_tools import ToolContext
 from .config import parse_aliases, resolve_group, resolve_persona
 from .interrupt import InterruptHub
@@ -762,12 +763,14 @@ class Engine:
             {t['function']['name'] for t in tools},
             custom_items, bool(enabled_mcp))
 
-        # 4) 组装消息
+        # 4) 组装消息。系统提示词只放跨轮稳定块：记忆/风格/约定/注入这些
+        # 每轮随发言人变化的块统一挪到历史之后的 LIVE_CTX 尾部块，避免它们
+        # 在提示词中段打断前缀缓存
         system_msg = self._system_prompt(
-            persona, mem_block, style_block, task_block, cfg,
+            persona, cfg,
             has_tools=bool(tools), has_mcp=bool(enabled_mcp),
             bot_id=self.p.bot_id, bot_name=self.p.bot_name,
-            chat_type=parsed.chat_type, inject_block=inject_block,
+            chat_type=parsed.chat_type,
             store=store, catalog=catalog)
         messages = [system_msg]
         if summary_text:
@@ -794,10 +797,12 @@ class Engine:
         messages.extend(ctx_mod.render_openai(
             window, raw_bg_notice=raw_bg_notice))
 
-        # 每轮易变块（自我记忆/本群身份/背景/心情/时钟/梗指南）全部挪到
-        # 对话历史之后合成一条：它们每轮都在变，放在历史前会让前缀在几千
-        # token 处断裂，后面的历史全部按未命中计费；放到尾部后只重算尾段。
-        live_parts = [self_block, roles_block]
+        # 每轮易变块（风格/群友记忆/约定/注入/自我记忆/本群身份/背景/心情/
+        # 时钟/梗指南）全部挪到对话历史之后合成一条：它们每轮都在变，放在
+        # 历史前会让前缀在几千 token 处断裂，后面的工具目录和历史全部按未命中
+        # 计费；放到尾部后只重算尾段。
+        live_parts = [style_block, mem_block, task_block, inject_block,
+                      self_block, roles_block]
         # 触发本轮前的未触发群聊（仅前台真人轮；后台苏醒/入群/外部触发不注入）
         if (not background and not raw_bg_notice
                 and cfg.get('ambient_context_on', True)
@@ -861,6 +866,13 @@ class Engine:
                          or str(actor_id or ''))
         ctx_sender_name = ((parsed.display_name if parsed.sender_id else '')
                            or str(actor_name or ''))
+        # official 通道：锚定本轮触发消息/发送人；关池时顺带做被动名额预算。
+        # napcat 通道检测结果 official=False，extra 恒为 None，行为不变。
+        transport_info = await passive_turn.detect_transport(self.p.bot)
+        pctx = passive_turn.TurnPassive(
+            transport_info,
+            anchor_msg_id=str(getattr(parsed, 'message_id', '') or ''),
+            anchor_user_id=ctx_sender_id)
         tool_ctx = ToolContext(
             bot=self.p.bot, group_id=gid, cfg=cfg,
             sandbox=self.p.sandbox(gid), db_path=self.p.db_path,
@@ -882,6 +894,7 @@ class Engine:
             bot_id=str(self.p.bot_id or ''),
             sent_texts=sent_texts, log=self.log,
             quote_state=quote_state,
+            pctx=pctx,
             sender_id=ctx_sender_id, sender_name=ctx_sender_name)
 
         # 5) 工具循环。本轮注册为「可打断活动轮」：/ai 打断 投来的群友消息
@@ -901,7 +914,7 @@ class Engine:
                 persona=persona, loop_ctx=loop_ctx, turn_id=turn_id)
             final_text, silent = await self._emit_final(
                 gid, cfg, parsed, final_text, sent_texts, turn_id=turn_id,
-                quote_state=quote_state)
+                quote_state=quote_state, pctx=pctx)
 
             # 收尾回复期间才到达的插队：同轮内再处理几波，让临时调整立即生效，
             # 而不是等下一轮对话才被看到
@@ -922,7 +935,7 @@ class Engine:
                     persona=persona, loop_ctx=loop_ctx, turn_id=turn_id)
                 final_text, silent = await self._emit_final(
                     gid, cfg, parsed, extra, sent_texts, turn_id=turn_id,
-                    quote_state=quote_state)
+                    quote_state=quote_state, pctx=pctx)
         finally:
             # 极窄竞态：最终收尾后又有插队到达、宽限波次已用尽。落库保留，
             # 下一轮前台对话能看到这条真人消息（不会凭空丢失）
@@ -1086,7 +1099,8 @@ class Engine:
                 n = await reply.send_in_chunks(
                     self.p.bot, gid, interim, cfg,
                     message_type=parsed.chat_type, name_map=at_map,
-                    quote_id=reply.take_quote(tool_ctx.quote_state))
+                    quote_id=reply.take_quote(tool_ctx.quote_state),
+                    pctx=tool_ctx.pctx)
                 sent_texts.add(interim)
                 self.log(f'群 {gid} 工具轮{rounds} 模型插话 {n} 条：'
                          f'{self._clip(interim, 120)}', 'ok')
@@ -1220,7 +1234,8 @@ class Engine:
         n_sent = await reply.send_in_chunks(
             self.p.bot, gid, text, cfg,
             message_type=parsed.chat_type, name_map=at_map,
-            quote_id=reply.take_quote(tool_ctx.quote_state))
+            quote_id=reply.take_quote(tool_ctx.quote_state),
+            pctx=tool_ctx.pctx)
         messages.append({'role': 'assistant', 'content': text})
         storage.insert_message(self.p.db_path, gid, 'assistant', text)
         tool_ctx.sent_texts.add(text)
@@ -1361,13 +1376,17 @@ class Engine:
         if not force and not self._compact_due(cfg, loop_ctx, weight,
                                                est_tokens):
             return False
-        # 本轮实时上下文块常驻消息末尾；它不属于对话过程，先摘出来，
-        # 压完再原样放回（否则会被当成对话内容滚进纪要或落在中段）
+        # 本轮实时上下文块不属于对话过程，先摘出来、压完再原样放回。
+        # 首次请求前它在消息末尾，但发生过工具调用后其后还挂着 assistant/tool
+        # 行，所以要全表定位而不能只看 messages[-1]（否则会被滚进纪要甚至删掉）
         live_msg = None
-        if (messages and messages[-1].get('role') == 'system'
-                and str(messages[-1].get('content') or '').startswith(
-                    ctx_mod.LIVE_CTX_HEADER)):
-            live_msg = messages.pop()
+        for _i in range(len(messages) - 1, -1, -1):
+            _m = messages[_i]
+            if (_m.get('role') == 'system'
+                    and str(_m.get('content') or '').startswith(
+                        ctx_mod.LIVE_CTX_HEADER)):
+                live_msg = messages.pop(_i)
+                break
         try:
             # 开头连续 system 块（系统提示词/摘要/PHI…）整体保留；
             # 但上一轮压缩留下的「进展纪要」要并入压缩区（其内容已随 summarize
@@ -1435,7 +1454,8 @@ class Engine:
 
     async def _emit_final(self, gid, cfg, parsed, final_text: str,
                           sent_texts: set, turn_id: str = '',
-                          quote_state: dict | None = None) -> tuple[str, bool]:
+                          quote_state: dict | None = None,
+                          pctx=None) -> tuple[str, bool]:
         """[nospeak] 内心戏剥离 + 终态去重 + 分条发送 + 落库。
 
         返回 (实际正文, 是否静默)。插队触发的续轮共用同一套终态处理；
@@ -1459,7 +1479,8 @@ class Engine:
             n = await reply.send_in_chunks(
                 self.p.bot, gid, final_text, cfg,
                 message_type=parsed.chat_type, name_map=at_map,
-                quote_id=reply.take_quote(quote_state))
+                quote_id=reply.take_quote(quote_state),
+                pctx=pctx)
             storage.insert_message(self.p.db_path, gid, 'assistant',
                                    final_text)
             sent_texts.add(final_text)
@@ -1483,7 +1504,13 @@ class Engine:
         两轮之间 messages 的公共前缀（系统提示词 → 摘要 → 历史开头）保持
         字节一致，供应商的前缀缓存才能命中。只有摘要真正重写（锚点前移）
         才会改变前缀，因此重写按「积压阈值 + 最短间隔」节流。
+
+        summary_mode='tail' 时完全不调 LLM：窗口满就机械前移锚点、只留尾部
+        tail_keep_msgs 条（见 _prepare_tail），前缀断点最少且零摘要 token。
         """
+        if cfg.get('summary_mode') == 'tail':
+            return await self._prepare_tail(gid, cfg)
+
         summary_row = storage.get_summary(self.p.db_path, gid)
         old_summary = (summary_row or {}).get('summary') or ''
         up_to = int((summary_row or {}).get('covered_up_to_id') or 0)
@@ -1515,9 +1542,41 @@ class Engine:
             # 也不让未摘要历史无限堆进提示词
             return old_summary, plan['window']
         new_up_to = int(overflow[-1]['id'])
-        storage.set_summary(self.p.db_path, gid, text, new_up_to, phash)
+        # 条件落库：旧快照晚到（跨进程/重连残留后台轮）不得把锚点写小，
+        # 否则同批历史会被反复摘要（曾表现为 48 分钟 146 次摘要的风暴）
+        if not storage.advance_summary(self.p.db_path, gid, text,
+                                       new_up_to, phash):
+            self.log(f'群 {gid} 摘要锚点已被更新（竞争落败），'
+                     '按库内权威锚点重建窗口', 'warn')
+            fresh = storage.get_summary(self.p.db_path, gid) or {}
+            fresh_up_to = int(fresh.get('covered_up_to_id') or 0)
+            fresh_rows = storage.messages_since(
+                self.p.db_path, gid, fresh_up_to)
+            fresh_win = ctx_mod.select_window(
+                fresh_rows,
+                int(cfg.get('window_rounds', 12)),
+                int(cfg.get('char_budget', 6000)))
+            return fresh.get('summary') or '', fresh_win
         storage.mark_summarized(self.p.db_path, gid, new_up_to)
         return text, rows[cut:]
+
+    async def _prepare_tail(self, gid, cfg):
+        """硬截尾模式：不调 LLM、不注入摘要；窗口超过 tail_keep_msgs 条时
+        机械前移锚点，只保留尾部消息。库内旧摘要文本保留不删，切回摘要
+        模式时还能滚动续用。
+        """
+        summary_row = storage.get_summary(self.p.db_path, gid) or {}
+        up_to = int(summary_row.get('covered_up_to_id') or 0)
+        rows = storage.messages_since(self.p.db_path, gid, up_to)
+        plan = ctx_mod.plan_tail(
+            rows, int(cfg.get('tail_keep_msgs', 30)),
+            int(cfg.get('char_budget', 6000)))
+        cut = plan['cut']
+        if cut > 0:
+            new_up_to = int(rows[cut - 1]['id'])
+            storage.advance_summary_anchor(self.p.db_path, gid, new_up_to)
+            storage.mark_summarized(self.p.db_path, gid, new_up_to)
+        return '', plan['window']
 
     async def _rebuild_summary(self, gid, cfg, persona, phash, old_summary,
                                up_to):
@@ -1712,10 +1771,9 @@ class Engine:
     # ── prompt ──────────────────────────────────────────────────
 
     @staticmethod
-    def _system_prompt(persona: str, mem_block: str, style_block: str,
-                       task_block: str, cfg: dict, has_tools: bool,
+    def _system_prompt(persona: str, cfg: dict, has_tools: bool,
                        has_mcp: bool = False, bot_id=0, bot_name: str = '',
-                       chat_type: str = 'group', inject_block: str = '',
+                       chat_type: str = 'group',
                        store=None, catalog: str = '') -> dict:
         scene = ('这是一对一 QQ 私聊。' if chat_type == 'private'
                  else '你在一个 QQ 群里。')
@@ -1725,9 +1783,9 @@ class Engine:
                         + (f'，昵称「{bot_name}」' if bot_name else '')
                         + '。有人 @ 这个号/昵称、或消息带 [回复 你] 前缀，'
                           '就是在跟你说话；群友之间互相 @、互相回复时别会错意。')
-        # 前缀缓存顺序：稳定块在前、每轮易变块（风格/记忆/约定/注入）压到最后。
-        # tools_guide 的 catalog 每轮工具集固定时是稳定大段，排在易变块之前，
-        # 避免记忆/注入一更新就打断后面所有内容的缓存。
+        # 系统提示词只放跨轮稳定块：人设、身份、禁则、工具目录（catalog 在
+        # 工具集固定时是稳定大段）。风格/群友记忆/未结约定/自我注入每轮随
+        # 发言人变化，已移到对话历史之后的 LIVE_CTX 尾部块，避免中段断前缀。
         parts = [
             persona.strip(),
             prompts_mod.render('identity', store,
@@ -1742,14 +1800,6 @@ class Engine:
                 catalog=catalog, owner_qq=cfg.get('owner_qq', '')))
         if has_tools and has_mcp:
             parts.append(prompts_mod.render('mcp_rules', store))
-        if style_block:
-            parts.append(style_block)
-        if mem_block:
-            parts.append(mem_block)
-        if task_block:
-            parts.append(task_block)
-        if inject_block:
-            parts.append(inject_block)
         return {'role': 'system', 'content': '\n\n'.join(p for p in parts if p)}
 
 

@@ -6,6 +6,8 @@
         "aliases": {"type": "string", "label": "全局称呼词（逗号分隔）", "default": ""},
         "window_rounds": {"type": "int", "label": "滑窗轮数", "default": 12},
         "char_budget": {"type": "int", "label": "滑窗字符预算", "default": 6000},
+        "summary_mode": {"type": "dropdown", "label": "上下文模式：summary=满窗调LLM滚摘要；tail=满窗零LLM只截尾部N条（前缀缓存最稳）", "default": "summary", "options": ["summary", "tail"]},
+        "tail_keep_msgs": {"type": "int", "label": "tail模式：机械保留尾部消息条数", "default": 30},
         "summary_min_new_msgs": {"type": "int", "label": "摘要节流：窗口外积压多少条才重写", "default": 12},
         "summary_min_new_chars": {"type": "int", "label": "摘要节流：窗口外积压多少字符才重写（与条数取或）", "default": 2000},
         "summary_min_interval_sec": {"type": "int", "label": "摘要节流：两次摘要最短间隔秒数", "default": 600},

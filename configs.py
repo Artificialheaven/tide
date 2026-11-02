@@ -44,6 +44,10 @@ default_config = {
     "official_passive_window_seconds": 295,
     "official_max_passive_seq": 5,
     "official_passive_pool_size": 64,
+    # 被动回复 msg_id 池：True=池内轮换（粘住当前 msg_id，用完才换，
+    # 优先同用户的 id）；False=不借用其他消息 id，一轮回复固定在触发消息上，
+    # 由发送方自行保证不超过 max_passive_seq 条（deepseek 会按余量均分切段）
+    "official_passive_pool_on": True,
     "official_max_upload_bytes": 5242880,
     "official_member_cache_ttl": 600,
     "official_member_failed_retry": 300,

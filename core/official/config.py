@@ -82,6 +82,7 @@ class OfficialConfig:
     passive_window_seconds: int = 295
     max_passive_seq: int = 5
     passive_pool_size: int = 64
+    passive_pool_on: bool = True
     max_upload_bytes: int = 5 * 1024 * 1024
 
     member_cache_ttl: int = 600
@@ -145,6 +146,8 @@ class OfficialConfig:
                 conf.get("official_max_passive_seq"), 5, 1, 5),
             passive_pool_size=_as_int(
                 conf.get("official_passive_pool_size"), 64, 1, 512),
+            passive_pool_on=_as_bool(
+                conf.get("official_passive_pool_on"), True),
             max_upload_bytes=_as_int(
                 conf.get("official_max_upload_bytes"), 5 * 1024 * 1024,
                 1024, 64 * 1024 * 1024),
@@ -186,5 +189,6 @@ class OfficialConfig:
             "bot_name": self.bot_name,
             "at_all_mode": self.at_all_mode,
             "allow_active": self.allow_active,
+            "passive_pool_on": self.passive_pool_on,
             "base_url": self.base_url,
         }

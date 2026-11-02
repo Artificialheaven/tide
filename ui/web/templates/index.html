@@ -359,55 +359,96 @@ function renderTrend(trend) {
 }
 
 // ====== 配置 ======
+// 表单描述：section=分组标题；类型 checkbox/select/number/password/text
+const CONFIG_FIELDS = [
+  {section: '基础'},
+  {key:'show_heartbeat', label:'显示心跳日志', type:'checkbox'},
+  {key:'transport', label:'连接方式', type:'select', options:['napcat','official']},
+  {key:'ws_address', label:'WebSocket 地址（napcat 通道）'},
+  {key:'token', label:'WS Token', type:'password'},
+  {key:'use_plugin_venv', label:'插件独立环境', type:'checkbox'},
+  {key:'max_reconnect_attempts', label:'最大重连次数 (0=无限)', type:'number'},
+  {key:'reconnect_base_delay', label:'重连初始延迟(秒)', type:'number'},
+  {key:'reconnect_max_delay', label:'重连最大延迟(秒)', type:'number'},
+  {section: 'Web 管理面板'},
+  {key:'enable_web_admin', label:'启用 Web 管理面板（重启生效）', type:'checkbox'},
+  {key:'web_admin_host', label:'监听地址（0.0.0.0=所有网卡，127.0.0.1=仅本机；重启生效）'},
+  {key:'web_admin_port', label:'端口（1-65535，重启生效）', type:'number'},
+  {key:'web_admin_token', label:'登录密码（留空=沿用 WS Token；********=不修改）', type:'password'},
+  {section: 'QQ 官方机器人（transport=official）'},
+  {key:'official_app_id', label:'官方 AppID'},
+  {key:'official_app_secret', label:'官方 AppSecret（********=不修改；留空=读环境变量）', type:'password'},
+  {key:'official_sandbox', label:'使用沙箱环境', type:'checkbox'},
+  {key:'official_allow_active', label:'被动名额耗尽后允许发主动消息', type:'checkbox'},
+  {key:'official_at_all_mode', label:'@全体成员降级方式', type:'select', options:['native','text','drop']},
+  {key:'official_passive_pool_on', label:'被动 msg_id 池（开=池内粘用轮换；关=一轮固定触发消息id，回复自动按余量分段）', type:'checkbox'},
+  {key:'official_max_passive_seq', label:'每条消息最大被动回复数 (1-5)', type:'number'},
+  {key:'official_passive_pool_size', label:'每群 id 池槽位数 (1-512)', type:'number'},
+  {key:'official_passive_window_seconds', label:'被动回复有效期秒数 (30-295)', type:'number'},
+];
+
 async function loadConfig() {
   const resp = await fetch('/api/config');
   const cfg = await resp.json();
   const form = document.getElementById('configForm');
-  const fields = [
-    {key:'show_heartbeat',label:'显示心跳',type:'checkbox'},
-    {key:'ws_address',label:'WebSocket 地址'},
-    {key:'token',label:'WS Token'},
-    {key:'web_admin_token',label:'Web 面板登录密码（留空则沿用 WS Token）',type:'password'},
-    {key:'use_plugin_venv',label:'插件独立环境',type:'checkbox'},
-    {key:'max_reconnect_attempts',label:'最大重连次数 (0=无限)'},
-    {key:'reconnect_base_delay',label:'重连初始延迟(秒)'},
-    {key:'reconnect_max_delay',label:'重连最大延迟(秒)'},
-    {key:'enable_web_admin',label:'启用 Web 管理面板',type:'checkbox'},
-    {key:'web_admin_host',label:'Web 面板监听地址（0.0.0.0=所有网卡，127.0.0.1=仅本机；改后重启生效）'},
-    {key:'web_admin_port',label:'Web 面板端口（1-65535，改后重启生效）'},
-  ];
-  form.innerHTML = fields.map(f => {
+  form.innerHTML = CONFIG_FIELDS.map(f => {
+    if (f.section) {
+      return `<div style="margin:18px 0 8px;font-size:13px;color:#fff;font-weight:600;
+        border-bottom:1px solid var(--border);padding-bottom:6px">${f.section}</div>`;
+    }
+    const val = cfg[f.key] ?? '';
     if (f.type === 'checkbox') {
-      return `<div class="form-group"><label>${f.label}</label>
-        <input type="checkbox" name="${f.key}" ${cfg[f.key]?'checked':''} style="width:auto"></div>`;
+      return `<div class="form-group"><label style="text-transform:none;font-size:13px">
+        <input type="checkbox" name="${f.key}" ${val?'checked':''} style="width:auto;vertical-align:middle"> ${f.label}</label></div>`;
     }
-    if (f.type === 'password') {
-      return `<div class="form-group"><label>${f.label}</label>
-        <input type="password" name="${f.key}" value="${cfg[f.key]??''}"></div>`;
+    if (f.type === 'select') {
+      const opts = (f.options||[]).map(o =>
+        `<option value="${o}" ${String(val)===o?'selected':''}>${o}</option>`).join('');
+      return `<div class="form-group"><label>${f.label}</label><select name="${f.key}">${opts}</select></div>`;
     }
+    if (f.type === 'number') {
+      return `<div class="form-group"><label>${f.label}</label>
+        <input type="number" name="${f.key}" value="${escapeHtml(String(val))}"></div>`;
+    }
+    const inputType = f.type === 'password' ? 'password' : 'text';
     return `<div class="form-group"><label>${f.label}</label>
-      <input name="${f.key}" value="${cfg[f.key]??''}"></div>`;
+      <input type="${inputType}" name="${f.key}" value="${escapeHtml(String(val))}" autocomplete="new-password"></div>`;
   }).join('');
 }
 
 async function saveConfig() {
-  const form = document.getElementById('configForm');
-  const fd = new FormData(form);
+  const msg = document.getElementById('configMsg');
   const data = {};
-  for (const [k,v] of fd.entries()) {
-    if (v === 'on') data[k] = true;
-    else if (v === '') data[k] = false;
-    else if (!isNaN(v) && ['max_reconnect_attempts','reconnect_base_delay','reconnect_max_delay','web_admin_port'].includes(k)) data[k] = parseInt(v);
-    else data[k] = v;
+  for (const f of CONFIG_FIELDS) {
+    if (f.section) continue;
+    const el = document.querySelector(`#configForm [name="${f.key}"]`);
+    if (!el) continue;
+    if (f.type === 'checkbox') {
+      data[f.key] = el.checked;                 // 取消勾选必须显式发 false
+    } else if (f.type === 'number') {
+      if (el.value.trim() === '') {
+        msg.textContent = `❌ ${f.label} 不能为空`;
+        msg.style.color = 'var(--red)';
+        return;
+      }
+      data[f.key] = parseInt(el.value, 10);    // 空串不再被误写成 false
+    } else {
+      data[f.key] = el.value;                  // 文本/密码：空串就是空串
+    }
   }
   const resp = await fetch('/api/config', {
     method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify(data)
   });
   const r = await resp.json();
-  const msg = document.getElementById('configMsg');
-  if (r.ok) { msg.textContent='✅ 保存成功'; msg.style.color='var(--green)'; }
-  else { msg.textContent='❌ 保存失败'; msg.style.color='var(--red)'; }
+  if (r.ok) {
+    msg.textContent='✅ 保存成功（部分项需重连/重启生效）';
+    msg.style.color='var(--green)';
+    loadConfig();   // 重新拉取，掩码/规整后的值与服务端对齐
+  } else {
+    msg.textContent='❌ 保存失败：' + (r.error || '未知错误');
+    msg.style.color='var(--red)';
+  }
 }
 
  // ====== 插件 ======
@@ -527,6 +568,7 @@ function loadAll() {
 
 // ====== 插件配置模态 ======
 let _curPlugin = '';
+let _curPluginSchema = {};
 
 async function openPluginConfig(name) {
   _curPlugin = name;
@@ -534,6 +576,7 @@ async function openPluginConfig(name) {
   const data = await resp.json();
   const schema = data.schema||{}, cfg = data.config||{};
 
+  _curPluginSchema = schema;
   const form = document.getElementById('pluginCfgForm');
   form.innerHTML = Object.entries(schema).map(([k,f]) => {
     const val = cfg[k] ?? f.default ?? '';
@@ -565,14 +608,22 @@ function closePluginConfig() {
 }
 
 async function savePluginConfig() {
-  const form = document.getElementById('pluginCfgForm');
-  const fd = new FormData(form);
   const data = {};
-  for (const [k,v] of fd.entries()) {
-    if (v === 'on') data[k] = true;
-    else if (v === '') data[k] = false;
-    else if (!isNaN(v) && v !== '') { const f = parseFloat(v); data[k] = Number.isInteger(f) ? parseInt(v) : f; }
-    else data[k] = v;
+  for (const [k, f] of Object.entries(_curPluginSchema || {})) {
+    const field = form.elements[k] || form.querySelector(`[name="${k}"]`);
+    if (!field) continue;
+    if (f.type === 'checkbox') {
+      data[k] = field.checked;                 // 取消勾选显式发 false
+    } else if (field.length && (field[0].type === 'radio')) {
+      const checked = form.querySelector(`[name="${k}"]:checked`);
+      data[k] = checked ? checked.value : '';
+    } else if (f.type === 'int' || f.type === 'number') {
+      if (field.value.trim() === '') { data[k] = ''; }
+      else { const n = parseFloat(field.value);
+             data[k] = Number.isInteger(n) ? parseInt(field.value, 10) : n; }
+    } else {
+      data[k] = field.value;                   // 文本空串保留为空串
+    }
   }
   const resp = await fetch('/api/plugins/'+_curPlugin+'/config', {
     method:'POST', headers:{'Content-Type':'application/json'},

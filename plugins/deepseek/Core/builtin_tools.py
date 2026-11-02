@@ -1346,6 +1346,8 @@ class ToolContext:
     # 引用回复状态 {'id': 触发消息 id, 'used': bool}；每轮一份，
     # 第一个真正发出的消息（文本/图片/语音）引用触发消息
     quote_state: dict | None = None
+    # official 通道单轮发送态（锚定 msg_id + 被动名额预算）；napcat 为 None
+    pctx: object = None
     log: object = None
     sender_id: str = ''
     sender_name: str = ''
@@ -1798,6 +1800,11 @@ async def dispatch(name: str, args: dict, ctx: ToolContext) -> str:
             text = str(args.get('text', '')).strip()
             if not text:
                 return '错误: text 为空'
+            # official 关池：工具发送先占名额，给终态回复留剩余条数
+            if ctx.pctx is not None and ctx.pctx.budgeted \
+                    and ctx.pctx.remaining <= 0:
+                return ('错误: 本轮被动回复名额（%d 条）已用完，'
+                        '不要再发消息，等下一轮对话' % ctx.pctx.max_seq)
             from .reply import sanitize_model_text, take_quote, reply_prefix
             text = sanitize_model_text(text)
             # 引用前缀只加在真正发出的消息上；去重集合仍记净文本，
@@ -1805,7 +1812,12 @@ async def dispatch(name: str, args: dict, ctx: ToolContext) -> str:
             send_text = reply_prefix(take_quote(ctx.quote_state)) + text
             await ctx.bot.send_message(message=send_text,
                                        target_id=ctx.group_id,
-                                       message_type=ctx.chat_type)
+                                       message_type=ctx.chat_type,
+                                       extra=(ctx.pctx.extra()
+                                              if ctx.pctx is not None
+                                              else None))
+            if ctx.pctx is not None:
+                ctx.pctx.consume(1)
             ctx.sent_texts.add(text)
             return '已发送'
 
@@ -1822,11 +1834,20 @@ async def dispatch(name: str, args: dict, ctx: ToolContext) -> str:
             text = str(args.get('text', '') or '').strip()
             if len(text) > 500:
                 return '错误: 通知正文最多 500 字'
+            if ctx.pctx is not None and ctx.pctx.budgeted \
+                    and ctx.pctx.remaining <= 0:
+                return ('错误: 本轮被动回复名额（%d 条）已用完，'
+                        '不要再发消息，等下一轮对话' % ctx.pctx.max_seq)
             from .reply import sanitize_model_text, strip_leading_time
             text = strip_leading_time(sanitize_model_text(text))
             msg = '[CQ:at,qq=all]' + ((' ' + text) if text else '')
             await ctx.bot.send_message(message=msg, target_id=ctx.group_id,
-                                       message_type='group')
+                                       message_type='group',
+                                       extra=(ctx.pctx.extra()
+                                              if ctx.pctx is not None
+                                              else None))
+            if ctx.pctx is not None:
+                ctx.pctx.consume(1)
             ctx.sent_texts.add(msg)
             return '已发送 @全体成员'
 
@@ -1874,8 +1895,17 @@ async def dispatch(name: str, args: dict, ctx: ToolContext) -> str:
             # 图片/语音不占用本轮引用：引用只给文本（qq_send_text 或终态），
             # 否则先发一张图/一条语音就把「第一句引用」用掉了，真正的文字
             # 回复反而引用不上；媒体带 [CQ:reply] 头也容易被客户端显示成怪样
+            if ctx.pctx is not None and ctx.pctx.budgeted \
+                    and ctx.pctx.remaining <= 0:
+                return ('错误: 本轮被动回复名额（%d 条）已用完，'
+                        '不要再发图，等下一轮对话' % ctx.pctx.max_seq)
             await ctx.bot.send_message(message=cq, target_id=ctx.group_id,
-                                       message_type=ctx.chat_type)
+                                       message_type=ctx.chat_type,
+                                       extra=(ctx.pctx.extra()
+                                              if ctx.pctx is not None
+                                              else None))
+            if ctx.pctx is not None:
+                ctx.pctx.consume(1)
             return '已发送'
 
         if name == 'qq_list_files':

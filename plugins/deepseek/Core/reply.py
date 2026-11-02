@@ -248,12 +248,15 @@ def _next_delay(cfg: dict, prev_len: int, rng) -> float:
 async def send_in_chunks(bot, target_id, text: str, cfg: dict,
                          rng=None, message_type: str = 'group',
                          name_map: dict | None = None,
-                         quote_id: str = '') -> int:
+                         quote_id: str = '',
+                         pctx=None) -> int:
     """按配置分条发送，返回实际发出的条数。群消息全程应在群锁内调用。
 
     name_map 非空时，先把文本里的 @昵称 换成真 CQ:at 段再切条
     （CQ 码在 split_reply 里是原子，不会被切散）；调用方落库仍用原文。
     quote_id 非空时，第一条前面拼 [CQ:reply,id=…]（引用触发消息）。
+    pctx（passive_turn.TurnPassive）非空时：official 通道的每次发送带
+    上锚定参数；关池模式下按本轮剩余被动名额均分切段，名额耗尽则不发。
     """
     if not (text or '').strip():
         return 0
@@ -274,15 +277,23 @@ async def send_in_chunks(bot, target_id, text: str, cfg: dict,
         chunks = [text.strip()]
     if not chunks:
         return 0
+    # official 关池：自然切条超出本轮剩余名额时，按余量均分重切
+    if pctx is not None:
+        chunks = pctx.plan_text(text, chunks)
+        if not chunks:
+            return 0
     prefix = reply_prefix(quote_id)
     if prefix:
         chunks[0] = prefix + chunks[0]
 
+    extra = pctx.extra() if pctx is not None else None
     sent = 0
     for i, chunk in enumerate(chunks):
         await bot.send_message(message=chunk, target_id=target_id,
-                               message_type=message_type)
+                               message_type=message_type, extra=extra)
         sent += 1
+        if pctx is not None:
+            pctx.consume(1)
         if i + 1 < len(chunks):
             await asyncio.sleep(_next_delay(cfg, len(chunk), rng))
     return sent

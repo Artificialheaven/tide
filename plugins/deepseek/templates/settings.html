@@ -54,6 +54,13 @@ button{background:#5e81ac;color:#fff;border:0;border-radius:4px;padding:8px 22px
   <textarea name="default_persona" placeholder="留空使用内置极简人设。每群可在群设置里覆盖。"></textarea>
 </fieldset>
 <fieldset><legend>上下文 / 触发</legend>
+  <label>上下文模式
+    <select name="summary_mode">
+      <option value="summary">摘要（满窗调LLM滚摘要）</option>
+      <option value="tail">截尾（满窗零LLM只留尾部N条）</option>
+    </select>
+  </label>
+  <label>截尾保留条数 <input type="number" name="tail_keep_msgs" min="2"></label>
   <label>滑窗轮数 <input type="number" name="window_rounds"></label>
   <label>滑窗字符预算 <input type="number" name="char_budget"></label>
   <label>摘要字符预算 <input type="number" name="summary_char_budget"></label>
@@ -382,6 +389,8 @@ document.getElementById('f').onsubmit = async e=>{
     if (el.name) body[el.name] = el.value;
   });
   e.target.querySelectorAll('input[type=checkbox]').forEach(c=>body[c.name]=c.checked);
+  const modeEl = e.target.querySelector('[name=summary_mode]');
+  if (modeEl) body.summary_mode = modeEl.value;
   const res = await fetch('/deepseek/api/settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
   const j = await res.json();
   tip.textContent = j.ok ? '✅ 已保存' : ('❌ '+(j.error||'失败'));

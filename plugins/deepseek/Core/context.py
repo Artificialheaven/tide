@@ -330,6 +330,26 @@ def plan_summary(rows: list, rounds: int, char_budget: int, *,
             'window': tail if due else rows}
 
 
+def plan_tail(rows: list, keep_msgs: int, char_budget: int) -> dict:
+    """硬截尾模式（不调 LLM 摘要）：窗口满时机械保留尾部 keep_msgs 条。
+
+    返回 {'cut': rows[:cut] 可机械丢出窗口, 'window': 本轮历史}；结果恒为
+    rows 的后缀（锚点可直接前移到 window[0].id - 1）。工具行不能打头、
+    assistant.tool_calls 必须带齐 tool 结果，复用 _trim_orphans 保证。
+    超字符预算时从最旧继续丢，防止单条巨消息撑爆提示词。
+    """
+    if not rows:
+        return {'cut': 0, 'window': []}
+    keep = max(2, int(keep_msgs))
+    win = rows if len(rows) <= keep else _trim_orphans(rows[-keep:])
+    # 条数没超但单条巨消息撑爆预算时，照样从最旧丢（结果仍为 rows 后缀）
+    while win and sum(_content_len(r) for r in win) > char_budget and len(win) > 1:
+        win = win[1:]
+        win = _trim_orphans(win)
+    cut = len(rows) - len(win)
+    return {'cut': cut, 'window': win}
+
+
 def render_injections(rows: list, max_chars: int = 1500) -> str:
     """把启用的自我注入条目渲染成系统提示词块；超预算从最旧/最后的丢弃。
 

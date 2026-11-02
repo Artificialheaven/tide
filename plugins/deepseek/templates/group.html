@@ -60,6 +60,8 @@ button{background:#5e81ac;color:#fff;border:0;border-radius:4px;padding:7px 16px
   <label>触发前背景消息 <select name="ambient_context_on"><option value="">继承全局</option><option value="true">开</option><option value="false">关</option></select></label>
   <label>长跑模式 <select name="loop_on"><option value="">继承全局</option><option value="true">开</option><option value="false">关</option></select></label>
   <label>梗指南自动注入 <select name="meme_guide_on"><option value="">继承全局</option><option value="true">开</option><option value="false">关</option></select></label>
+  <label>上下文模式 <select name="summary_mode"><option value="">继承全局</option><option value="summary">摘要（满窗调LLM滚摘要）</option><option value="tail">截尾（满窗零LLM只留尾部N条）</option></select></label>
+  <label>截尾条数（空=继承）<input name="tail_keep_msgs" type="number" min="2" placeholder="继承"></label>
   <label>滑窗轮数（空=继承）<input name="window_rounds" type="number" placeholder="继承"></label>
   <label>滑窗字符预算（空=继承）<input name="char_budget" type="number" placeholder="继承"></label>
   <label>背景消息条数（空=继承）<input name="ambient_context_n" type="number" placeholder="继承"></label>
@@ -110,7 +112,8 @@ const BUILTIN = [['qq.text','群发文本'],['qq.image','群发图片'],['qq.voi
 const SEL_KEYS = ['model','enable_thinking','split_reply','heuristic_on','judge_on',
                   'memory_on','self_memory_on','mood_on','learn_style_on','reminder_on','wake_on',
                   'speakup_on','interrupt_on','ambient_context_on','screen_on',
-                  'loop_on','meme_guide_on','at_only_on','quote_reply_on'];
+                  'loop_on','meme_guide_on','at_only_on','quote_reply_on',
+                  'summary_mode'];
 let overrides = {};
 // 不用 F 这种 document 级具名简写（部分浏览器/WebView 拿不到）
 const F = document.getElementById('f');
@@ -138,6 +141,7 @@ async function loadGroup(){
     const el = F[k];
     if (el) el.value = (k in st) ? String(st[k]) : '';
   }
+  F.tail_keep_msgs.value = st.tail_keep_msgs ?? '';
   F.window_rounds.value = st.window_rounds ?? '';
   F.char_budget.value = st.char_budget ?? '';
   F.ambient_context_n.value = st.ambient_context_n ?? '';
@@ -298,7 +302,7 @@ document.getElementById('f').onsubmit = async e=>{
     const v=el.value;
     if (v!=='') st[k] = (v==='true')?true:(v==='false'?false:v);
   }
-  for (const k of ['window_rounds','char_budget','ambient_context_n','loop_every_rounds']){
+  for (const k of ['window_rounds','char_budget','ambient_context_n','loop_every_rounds','tail_keep_msgs']){
     const v=F[k].value.trim();
     if (v) st[k]=Number(v);
   }

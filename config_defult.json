@@ -24,6 +24,7 @@
     "official_passive_window_seconds": 295,
     "official_max_passive_seq": 5,
     "official_passive_pool_size": 64,
+    "official_passive_pool_on": true,
     "official_max_upload_bytes": 5242880,
     "official_member_cache_ttl": 600,
     "official_member_failed_retry": 300,

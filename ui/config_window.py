@@ -13,6 +13,7 @@ def save_config(sender, app_data, user_data):
     transport = str(dpg.get_value("transport")).strip().lower()
     official_app_id = str(dpg.get_value("official_app_id")).strip()
     official_app_secret = str(dpg.get_value("official_app_secret")).strip()
+    official_passive_pool_on = bool(dpg.get_value("official_passive_pool_on"))
 
     # 更新全局变量
     globals.show_heart_beat = show_heartbeat
@@ -25,6 +26,7 @@ def save_config(sender, app_data, user_data):
     configs.conf["transport"] = transport
     configs.conf["official_app_id"] = official_app_id
     configs.conf["official_app_secret"] = official_app_secret
+    configs.conf["official_passive_pool_on"] = official_passive_pool_on
 
     # 保存到文件
     configs.save_config()
@@ -122,6 +124,14 @@ def create_config_window():
             tag="official_app_secret",
             password=True,
             hint="留空则读取 QQBOT_APP_SECRET 环境变量..."
+        )
+
+        dpg.add_spacer(height=10)
+
+        dpg.add_checkbox(
+            label="被动 msg_id 池（关=一轮固定一个触发消息id，回复自动按余量分段）",
+            default_value=configs.conf.get("official_passive_pool_on", True),
+            tag="official_passive_pool_on"
         )
 
         dpg.add_spacer(height=30)

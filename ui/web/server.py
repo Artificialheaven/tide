@@ -104,6 +104,23 @@ def api_check_auth():
 SECRET_MASK = '********'
 _SECRET_KEYS = ('official_app_secret', 'web_admin_token')
 
+# 面板可改的布尔/整型键及范围（其余官方细项不在面板暴露）
+_BOOL_KEYS = frozenset({
+    'show_heartbeat', 'use_plugin_venv', 'enable_web_admin',
+    'official_sandbox', 'official_allow_active',
+    'official_enable_member_enrich', 'official_passive_pool_on',
+})
+_INT_RANGES = {
+    'web_admin_port': (1, 65535),
+    'max_reconnect_attempts': (0, 10 ** 9),
+    'reconnect_base_delay': (0, 86400),
+    'reconnect_max_delay': (0, 7 * 86400),
+    'official_passive_window_seconds': (30, 295),
+    'official_max_passive_seq': (1, 5),
+    'official_passive_pool_size': (1, 512),
+    'official_request_timeout': (5, 120),
+}
+
 
 @_app.route("/api/config", methods=["GET"])
 @login_required
@@ -128,19 +145,27 @@ def _validate_config_update(data: dict) -> tuple[dict, str]:
             continue
         if key in _SECRET_KEYS:
             clean[key] = str(value or '').strip()
+        elif key in _BOOL_KEYS:
+            clean[key] = bool(value)
+        elif key in _INT_RANGES:
+            try:
+                number = int(value)
+            except (TypeError, ValueError):
+                return {}, f'{key} 必须是整数'
+            low, high = _INT_RANGES[key]
+            if not low <= number <= high:
+                return {}, f'{key} 必须在 {low}-{high} 之间'
+            clean[key] = number
         elif key == 'transport':
             transport = str(value or '').strip().lower()
             if transport not in ('napcat', 'official'):
                 return {}, 'transport 只能是 napcat 或 official'
             clean[key] = transport
-        elif key == 'web_admin_port':
-            try:
-                port = int(value)
-            except (TypeError, ValueError):
-                return {}, 'Web 面板端口必须是整数'
-            if not 1 <= port <= 65535:
-                return {}, 'Web 面板端口必须在 1-65535 之间'
-            clean[key] = port
+        elif key == 'official_at_all_mode':
+            mode = str(value or '').strip().lower()
+            if mode not in ('native', 'text', 'drop'):
+                return {}, 'official_at_all_mode 只能是 native/text/drop'
+            clean[key] = mode
         elif key == 'web_admin_host':
             host = str(value or '').strip()
             if not host or len(host) > 253 or any(ch.isspace() for ch in host):

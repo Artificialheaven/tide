@@ -82,7 +82,8 @@ class OfficialSession:
         self.messages = MessageIndex()
         self.passive = PassivePool(config.passive_window_seconds,
                                    config.max_passive_seq,
-                                   config.passive_pool_size)
+                                   config.passive_pool_size,
+                                   pool_on=config.passive_pool_on)
 
         self.out_queue: asyncio.Queue = asyncio.Queue()
         self._tasks: set[asyncio.Task] = set()
@@ -110,8 +111,10 @@ class OfficialSession:
             return
         if event.get("post_type") == "message":
             group_id = str(event.get("group_id") or "")
+            user_id = str(event.get("user_id") or "")
             self.groups.upsert(group_id)
-            self.passive.add(group_id, event.get("message_id", ""))
+            self.passive.add(group_id, event.get("message_id", ""),
+                             user_id=user_id)
             self.messages.add(build_message_record(
                 event, (d or {}).get("attachments") or []))
             self._schedule_enrich(group_id,
@@ -234,9 +237,17 @@ class OfficialSession:
             if params.get("user_id"):
                 return fail_envelope("官方机器人仅支持群聊消息")
             return fail_envelope("缺少 group_id")
-        return await self.send_group(group_id, params.get("message"))
+        # OneBot 扩展参数（下划线前缀）：只给适配层选被动 msg_id 用，
+        # 不是消息内容；NapCat 通道会忽略这类未知参数
+        anchor_msg_id = str(params.get("_official_msg_id") or "").strip()
+        anchor_user_id = str(params.get("_official_user_id") or "").strip()
+        return await self.send_group(
+            group_id, params.get("message"),
+            anchor_msg_id=anchor_msg_id, anchor_user_id=anchor_user_id)
 
-    async def send_group(self, group_id: str, message) -> dict:
+    async def send_group(self, group_id: str, message,
+                         anchor_msg_id: str = "",
+                         anchor_user_id: str = "") -> dict:
         segments = normalize_segments(message)
         try:
             items, reply_id = build_plan(
@@ -248,12 +259,15 @@ class OfficialSession:
             return fail_envelope("消息内容为空")
 
         items = self._expand_text_items(items)
+        # CQ 显式引用优先；否则用发送方锚定的触发消息（每轮回复粘住它）
+        prefer_msg_id = reply_id or anchor_msg_id
         sent_count = 0
         last_id = ""
         async with self.passive.lock(group_id):
             for item in items:
                 try:
-                    response = await self._deliver(group_id, item, reply_id)
+                    response = await self._deliver(
+                        group_id, item, prefer_msg_id, anchor_user_id)
                 except SendExhausted:
                     return fail_envelope(
                         "被动回复名额已用完（官方限制每条消息 5 条、约 5 分钟）；"
@@ -286,15 +300,19 @@ class OfficialSession:
         return out
 
     async def _deliver(self, group_id: str, item: SendItem,
-                       prefer_msg_id: str) -> dict:
+                       prefer_msg_id: str,
+                       prefer_user_id: str = "") -> dict:
         media_obj = None
         if item.kind == "media" and item.media is not None:
             media_obj = await self._upload_media(group_id, item.media)
 
         last_error: Optional[OfficialAPIError] = None
         for attempt in range(2):
+            # 重试时丢弃被官方拒绝的 msg_id 偏好，但同用户偏好保留
+            # （关池模式下没有偏好时只重新锚定最新一条）
             reserve = self.passive.reserve(
-                group_id, prefer_msg_id if attempt == 0 else "")
+                group_id, prefer_msg_id if attempt == 0 else "",
+                prefer_user_id)
             if reserve is None:
                 if self.config.allow_active:
                     body = self._message_body(item, media_obj, None)
@@ -558,7 +576,9 @@ class OfficialSession:
 
     async def _action_get_version_info(self, params: dict) -> dict:
         data = {"app_name": "QQOfficial", "app_version": "1.0.0",
-                "protocol_version": "v11"}
+                "protocol_version": "v11", "transport": "official",
+                "passive_pool_on": self.config.passive_pool_on,
+                "max_passive_seq": self.config.max_passive_seq}
         return _with_flat(ok_envelope(data), data)
 
     async def _action_get_status(self, params: dict) -> dict:

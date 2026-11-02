@@ -622,6 +622,7 @@ class main(Plugin):
             f'入站视频：{"开" if eff.get("inbound_video_on") else "关"}'
             f'（上限 {eff.get("inbound_video_max_kb")}KB）\n'
             f'窗口轮数：{eff.get("window_rounds")}\n'
+            f'上下文模式：{"截尾保留尾部 " + str(eff.get("tail_keep_msgs")) + " 条" if eff.get("summary_mode") == "tail" else "LLM 滚动摘要"}\n'
             f'历史消息：{len(msgs)} 条；摘要：{"有" if sm and sm.get("summary") else "无"}'
         )
 

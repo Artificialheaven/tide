@@ -325,11 +325,20 @@ class PluginBotWrapper:
             return getattr(self._bot, name)
         raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
     
-    async def send_message(self, message, target_id=None, message_type="private", **kwargs):
-        """发送消息（自动注入plugin_name）"""
+    async def send_message(self, message, target_id=None, message_type="private",
+                           extra=None, **kwargs):
+        """发送消息（自动注入plugin_name）
+
+        extra：附加 action 参数（如 official 通道的
+        {'_official_msg_id': ..., '_official_user_id': ...}），
+        NapCat 通道会忽略未知参数。其余未知 kwargs 同样并入 extra。
+        """
+        merged = dict(extra or {})
+        merged.update(kwargs)
         return await self._bot.send_message(
-            message, target_id, message_type, 
-            plugin_name=self._plugin_name
+            message, target_id, message_type,
+            plugin_name=self._plugin_name,
+            extra=merged or None
         )
     
     async def get_group_list(self, no_cache=False):
