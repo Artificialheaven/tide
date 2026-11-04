@@ -320,8 +320,10 @@ class LLMClient:
         usr = f'{recent}\n最后一条：{user_text}' if recent else f'最后一条：{user_text}'
         messages = [{'role': 'system', 'content': sys},
                     {'role': 'user', 'content': usr}]
-        result = await self.chat(messages, cfg, route='judge_model',
-                                 max_tokens=80, temperature=0.0, kind='judge', no_thinking=True)
+        result = await self.chat(
+            messages, cfg, route='judge_model', max_tokens=80,
+            temperature=0.0, kind='judge',
+            no_thinking=not cfg.get('cheap_thinking_on', False))
         should, reason = _parse_judge(result.content)
         if should is None:
             if not result.content.strip():
@@ -345,9 +347,10 @@ class LLMClient:
             parts.insert(1, f'已有摘要（请融合而非照抄）：\n{old_summary}')
         messages = [{'role': 'system', 'content': sys},
                     {'role': 'user', 'content': '\n\n'.join(parts)}]
-        result = await self.chat(messages, cfg, route='summary_model',
-                                 max_tokens=600, temperature=0.2,
-                                 kind='summary', no_thinking=True)
+        result = await self.chat(
+            messages, cfg, route='summary_model', max_tokens=600,
+            temperature=0.2, kind='summary',
+            no_thinking=not cfg.get('cheap_thinking_on', False))
         return result.content.strip(), result.usage
 
     # ── 记忆抽取 ────────────────────────────────────────────────
@@ -363,9 +366,10 @@ class LLMClient:
         sys = self._prompt('extract_prompt')
         messages = [{'role': 'system', 'content': sys},
                     {'role': 'user', 'content': script}]
-        result = await self.chat(messages, cfg, route='extract_model',
-                                 max_tokens=1100, temperature=0.1,
-                                 kind='extract', no_thinking=True)
+        result = await self.chat(
+            messages, cfg, route='extract_model', max_tokens=1100,
+            temperature=0.1, kind='extract',
+            no_thinking=not cfg.get('cheap_thinking_on', False))
         data = _loose_json(result.content) or {}
         entries = data.get('entries') if isinstance(data, dict) else None
         if not isinstance(entries, list):
@@ -452,9 +456,10 @@ class LLMClient:
         parts.append(f'她这一轮的回复：\n{reply_text.strip()[:800]}')
         messages = [{'role': 'system', 'content': _MOOD_SYSTEM},
                     {'role': 'user', 'content': '\n\n'.join(parts)}]
-        result = await self.chat(messages, cfg, route='mood_model',
-                                 max_tokens=200, temperature=0.2,
-                                 kind='mood', no_thinking=True)
+        result = await self.chat(
+            messages, cfg, route='mood_model', max_tokens=200,
+            temperature=0.2, kind='mood',
+            no_thinking=not cfg.get('cheap_thinking_on', False))
         data = _loose_json(result.content)
         if not isinstance(data, dict):
             raise LLMError(
@@ -526,12 +531,17 @@ class LLMClient:
         )
         messages = [{'role': 'system', 'content': sys},
                     {'role': 'user', 'content': script[-6000:]}]
-        result = await self.chat(messages, cfg, route='style_model',
-                                 max_tokens=500, temperature=0.3,
-                                 kind='style', no_thinking=True)
+        result = await self.chat(
+            messages, cfg, route='style_model', max_tokens=500,
+            temperature=0.3, kind='style',
+            no_thinking=not cfg.get('cheap_thinking_on', False))
         return result.content.strip(), result.usage
 
 
 def _is_param_error(exc) -> bool:
     s = str(exc).lower()
-    return 'thinking' in s or 'unknown parameter' in s or 'unrecognized' in s
+    return ('thinking' in s or 'unknown parameter' in s
+            or 'unrecognized' in s
+            # 智谱 1210：「该模型始终思考，不支持关闭思考」——英文 thinking
+            # 不在文案里，摘参数重试一次（cheap_thinking_on 关时的兜底）
+            or '不支持关闭思考' in s or '始终思考' in s)

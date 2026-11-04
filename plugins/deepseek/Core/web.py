@@ -223,6 +223,189 @@ def build_blueprint(plugin) -> flask.Blueprint:
             'subscribers': live.bus.count() if live else 0,
         }})
 
+    # ── B 站直播 AI（M3；docs/bilibili-live-plan.md）───────────
+
+    @bp.route('/live')
+    def bili_live_page():
+        return flask.render_template('bili_live.html')
+
+    def _live_mgr():
+        from .bili_live import BiliLiveManager
+        return BiliLiveManager(_plugin())
+
+    @bp.route('/api/live/snapshot', methods=['GET'])
+    def api_live_snapshot():
+        mgr = _live_mgr()
+        return flask.jsonify({'ok': True, 'rooms': mgr.snapshot()})
+
+    @bp.route('/api/live/rooms', methods=['POST'])
+    def api_live_room_add():
+        data = flask.request.get_json(silent=True) or {}
+        try:
+            display = int(str(data.get('room', '')).strip())
+        except (TypeError, ValueError):
+            return flask.jsonify({'ok': False, 'error': '房间号必须是数字'}), 400
+        if display <= 0:
+            return flask.jsonify({'ok': False, 'error': '房间号非法'}), 400
+        coro = _live_mgr().resolve_room(display)
+        real_id, err = _run_async(coro, timeout=20)
+        if err:
+            return flask.jsonify(
+                {'ok': False,
+                 'error': f'解析房间失败（{err[1]}）：{err[0]}'}), err[1]
+        try:
+            row = _live_mgr().add_room(real_id)
+        except Exception as e:
+            return flask.jsonify({'ok': False, 'error': str(e)}), 500
+        return flask.jsonify({'ok': True, 'room_id': real_id, 'room': row})
+
+    @bp.route('/api/live/rooms/<room_id>', methods=['PUT'])
+    def api_live_room_update(room_id):
+        data = flask.request.get_json(silent=True) or {}
+        fields = {}
+        for k in ('batch_seconds', 'batch_max', 'immediate_sc',
+                  'immediate_gift', 'gift_threshold'):
+            if k in data:
+                try:
+                    fields[k] = max(0, int(data[k]))
+                except (TypeError, ValueError):
+                    return flask.jsonify(
+                        {'ok': False, 'error': f'{k} 必须是整数'}), 400
+        if fields.get('batch_seconds', 20) < 3:
+            fields['batch_seconds'] = 3
+        if 'model_route' in data:
+            fields['model_route'] = str(data['model_route'] or '')[:200]
+        if fields:
+            storage.upsert_live_room(db(), room_id, **fields)
+        # 人设复用 groups.persona（gid = bili:<房间号>）
+        if 'persona' in data:
+            storage.get_or_create_group(db(), f'bili:{room_id}')
+            storage.upsert_group(db(), f'bili:{room_id}',
+                                 persona=str(data['persona'] or ''),
+                                 touch=False)
+        row = storage.get_live_room(db(), room_id)
+        if row is None:
+            return flask.jsonify({'ok': False, 'error': '房间不存在'}), 404
+        return flask.jsonify({'ok': True, 'room': row})
+
+    @bp.route('/api/live/rooms/<room_id>/start', methods=['POST'])
+    def api_live_start(room_id):
+        try:
+            info = _live_mgr().start(room_id)
+        except RuntimeError as e:
+            return flask.jsonify({'ok': False, 'error': str(e)}), 400
+        except Exception as e:
+            return flask.jsonify({'ok': False, 'error': f'启动失败：{e}'}), 500
+        return flask.jsonify({'ok': True, **info})
+
+    @bp.route('/api/live/rooms/<room_id>/stop', methods=['POST'])
+    def api_live_stop(room_id):
+        force = bool((flask.request.get_json(silent=True) or {}).get('force'))
+        mgr = _live_mgr()
+        if force:
+            killed = mgr.force_stop(room_id)
+            return flask.jsonify({'ok': True, 'forced': True, 'killed': killed})
+        mgr.request_stop(room_id)
+        return flask.jsonify({'ok': True, 'forced': False})
+
+    @bp.route('/api/live/sessions/<int:sid>/logs', methods=['GET'])
+    def api_live_logs(sid):
+        text = _live_mgr().log_tail(sid)
+        return flask.jsonify({'ok': True, 'logs': text})
+
+    # ── M4：场次历史 + 观众身份绑定 ─────────────────────────────
+
+    @bp.route('/api/live/sessions', methods=['GET'])
+    def api_live_sessions():
+        room = flask.request.args.get('room', '')
+        try:
+            limit = min(100, int(flask.request.args.get('limit', 30)))
+        except ValueError:
+            limit = 30
+        rows = storage.list_live_sessions(db(), room_id=room, limit=limit)
+        return flask.jsonify({'ok': True, 'sessions': rows})
+
+    @bp.route('/api/live/sessions/<int:sid>/resummarize', methods=['POST'])
+    def api_live_resummarize(sid):
+        coro = _live_mgr().resummarize(sid)
+        res, err = _run_async(coro, timeout=90)
+        if err:
+            return flask.jsonify(
+                {'ok': False, 'error': f'{err[0]}（HTTP {err[1]}）'}), 502
+        return flask.jsonify({'ok': True, **res})
+
+    @bp.route('/api/live/identities', methods=['GET'])
+    def api_live_identities():
+        p = _plugin()
+        owner_qq = int((p.cfg if p else {}).get('owner_qq') or 0)
+        rows = storage.list_live_identities(db())
+        return flask.jsonify({'ok': True, 'identities': rows,
+                              'owner_qq': owner_qq})
+
+    @bp.route('/api/live/identities/<bili_uid>/bind', methods=['POST'])
+    def api_live_bind(bili_uid):
+        data = flask.request.get_json(silent=True) or {}
+        qq = str(data.get('qq') or '').strip()
+        try:
+            counts = storage.bind_live_identity(db(), bili_uid, qq)
+        except KeyError as e:
+            return flask.jsonify({'ok': False, 'error': str(e)}), 404
+        except ValueError as e:
+            return flask.jsonify({'ok': False, 'error': str(e)}), 400
+        p = _plugin()
+        owner_qq = int((p.cfg if p else {}).get('owner_qq') or 0)
+        return flask.jsonify(
+            {'ok': True, 'counts': counts,
+             'is_owner': owner_qq and int(qq) == owner_qq})
+
+    @bp.route('/api/live/identities/<bili_uid>/bind', methods=['DELETE'])
+    def api_live_unbind(bili_uid):
+        storage.unbind_live_identity(db(), bili_uid)
+        return flask.jsonify({'ok': True})
+
+    # ── B 站扫码凭据（bilibili_api 延迟导入，缺库只影响这几个端点）──
+
+    @bp.route('/api/live/credential', methods=['GET'])
+    def api_live_credential():
+        from . import bili_auth
+        force = flask.request.args.get('force') in ('1', 'true')
+        coro = bili_auth.validate(force=force)
+        res, err = _run_async(coro, timeout=15)
+        if err:
+            # 触网校验失败时退化为文件级状态，页面仍可用
+            return flask.jsonify(
+                {'ok': True, 'info': bili_auth.credential_snapshot(),
+                 'check_error': err[0]})
+        return flask.jsonify({'ok': True, 'info': res})
+
+    @bp.route('/api/live/credential', methods=['DELETE'])
+    def api_live_credential_delete():
+        from . import bili_auth
+        bili_auth.delete_credential()
+        return flask.jsonify({'ok': True})
+
+    @bp.route('/api/live/credential/qr/start', methods=['POST'])
+    def api_live_qr_start():
+        from . import bili_auth
+        try:
+            res, err = _run_async(bili_auth.qr_start(), timeout=20)
+        except ImportError as e:
+            return flask.jsonify(
+                {'ok': False, 'error': f'缺少依赖：{e}（pip install '
+                                       'bilibili-api-python aiohttp qrcode）'}), 503
+        if err:
+            return flask.jsonify({'ok': False, 'error': err[0]}), err[1]
+        return flask.jsonify({'ok': True, **res})
+
+    @bp.route('/api/live/credential/qr/poll', methods=['GET'])
+    def api_live_qr_poll():
+        from . import bili_auth
+        sid = flask.request.args.get('sid', '')
+        res, err = _run_async(bili_auth.qr_poll(sid), timeout=15)
+        if err:
+            return flask.jsonify({'ok': False, 'error': err[0]}), err[1]
+        return flask.jsonify({'ok': True, **res})
+
     # ── 全局设置 ───────────────────────────────────────────────
 
     @bp.route('/api/settings', methods=['GET'])

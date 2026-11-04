@@ -497,6 +497,45 @@ _DDL_V16 = [
     "CREATE INDEX IF NOT EXISTS idx_ls_group ON loop_sessions(group_id, id DESC)",
 ]
 
+# v17：B 站直播 AI（docs/bilibili-live-plan.md）。M1 只建表，暂无 DAL；
+# 房间节奏配置走 live_rooms（人设仍复用 groups.persona），观众 B 站 uid
+# 与 QQ 的绑定走 live_identity，场次与下播复盘走 live_sessions。
+_DDL_V17 = [
+    """CREATE TABLE IF NOT EXISTS live_rooms (
+        room_id        TEXT PRIMARY KEY,
+        enabled        INTEGER NOT NULL DEFAULT 0,
+        batch_seconds  INTEGER NOT NULL DEFAULT 20,
+        batch_max      INTEGER NOT NULL DEFAULT 30,
+        immediate_sc   INTEGER NOT NULL DEFAULT 1,
+        immediate_gift INTEGER NOT NULL DEFAULT 0,
+        gift_threshold INTEGER NOT NULL DEFAULT 0,
+        model_route    TEXT NOT NULL DEFAULT '',
+        created_at     REAL NOT NULL,
+        updated_at     REAL NOT NULL DEFAULT 0
+    )""",
+    """CREATE TABLE IF NOT EXISTS live_identity (
+        bili_uid   TEXT PRIMARY KEY,
+        qq         TEXT NOT NULL DEFAULT '',
+        bili_name  TEXT NOT NULL DEFAULT '',
+        first_seen REAL NOT NULL,
+        last_seen  REAL NOT NULL DEFAULT 0,
+        msg_count  INTEGER NOT NULL DEFAULT 0,
+        linked_at  REAL NOT NULL DEFAULT 0
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_liveid_qq ON live_identity(qq)",
+    """CREATE TABLE IF NOT EXISTS live_sessions (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        room_id      TEXT NOT NULL,
+        status       TEXT NOT NULL DEFAULT 'running',
+        started_at   REAL NOT NULL,
+        ended_at     REAL NOT NULL DEFAULT 0,
+        heartbeat_at REAL NOT NULL DEFAULT 0,
+        stats_json   TEXT NOT NULL DEFAULT '{}',
+        summary      TEXT NOT NULL DEFAULT ''
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_livesess_room ON live_sessions(room_id, id DESC)",
+]
+
 
 def migrate(db_path: str):
     """初始化/升级数据库。幂等。"""
@@ -596,6 +635,10 @@ def migrate(db_path: str):
             for ddl in _DDL_V16:
                 conn.execute(ddl)
             conn.execute('PRAGMA user_version=16')
+        if version < 17:
+            for ddl in _DDL_V17:
+                conn.execute(ddl)
+            conn.execute('PRAGMA user_version=17')
         conn.commit()
     except Exception:
         conn.rollback()
@@ -3313,5 +3356,328 @@ def interrupt_running_loops(db_path: str) -> int:
             (time.time(),))
         conn.commit()
         return cur.rowcount
+    finally:
+        conn.close()
+
+
+# ── B 站直播 DAL（v17；docs/bilibili-live-plan.md）──────────────
+
+_LIVE_ROOM_INT_KEYS = frozenset({
+    'enabled', 'batch_seconds', 'batch_max',
+    'immediate_sc', 'immediate_gift', 'gift_threshold',
+})
+
+
+def _live_room_row(r: sqlite3.Row) -> dict:
+    d = dict(r)
+    for k in _LIVE_ROOM_INT_KEYS:
+        d[k] = int(d.get(k) or 0)
+    return d
+
+
+def get_live_room(db_path: str, room_id) -> dict | None:
+    conn = connect(db_path)
+    try:
+        r = conn.execute(
+            'SELECT * FROM live_rooms WHERE room_id=?', (str(room_id),)
+        ).fetchone()
+        return _live_room_row(r) if r else None
+    finally:
+        conn.close()
+
+
+def list_live_rooms(db_path: str) -> list:
+    conn = connect(db_path)
+    try:
+        rows = conn.execute(
+            'SELECT * FROM live_rooms ORDER BY updated_at DESC, rowid DESC'
+        ).fetchall()
+        return [_live_room_row(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def upsert_live_room(db_path: str, room_id, **fields) -> dict:
+    """增量更新直播房间配置；只接受表内已知列，int 列自动强转。"""
+    allowed = {'batch_seconds', 'batch_max', 'immediate_sc',
+               'immediate_gift', 'gift_threshold', 'model_route', 'enabled'}
+    sets, vals = [], []
+    for k, v in fields.items():
+        if k not in allowed or v is None:
+            continue
+        sets.append(f'{k}=?')
+        vals.append(int(v) if k in _LIVE_ROOM_INT_KEYS else str(v))
+    conn = connect(db_path)
+    try:
+        now = time.time()
+        conn.execute(
+            'INSERT OR IGNORE INTO live_rooms (room_id, created_at, updated_at) '
+            'VALUES (?,?,?)',
+            (str(room_id), now, now))
+        if sets:
+            vals2 = vals + [now, str(room_id)]
+            conn.execute(
+                f"UPDATE live_rooms SET {', '.join(sets)}, updated_at=? "
+                'WHERE room_id=?', vals2)
+        else:
+            conn.execute('UPDATE live_rooms SET updated_at=? WHERE room_id=?',
+                         (now, str(room_id)))
+        conn.commit()
+    finally:
+        conn.close()
+    return get_live_room(db_path, room_id)
+
+
+def _live_session_row(r: sqlite3.Row) -> dict:
+    d = dict(r)
+    try:
+        d['stats'] = json.loads(d.pop('stats_json') or '{}')
+    except json.JSONDecodeError:
+        d['stats'] = {}
+    return d
+
+
+def create_live_session(db_path: str, room_id, stats: dict | None = None) -> int:
+    """面板先建行（pid/log_path），子进程拿 session id 持续心跳。"""
+    conn = connect(db_path)
+    try:
+        now = time.time()
+        cur = conn.execute(
+            'INSERT INTO live_sessions (room_id, status, started_at, '
+            'heartbeat_at, stats_json) VALUES (?,?,?,?,?)',
+            (str(room_id), 'running', now, now,
+             json.dumps(stats or {}, ensure_ascii=False)))
+        conn.commit()
+        return int(cur.lastrowid)
+    finally:
+        conn.close()
+
+
+def _update_session_stats(conn, session_id: int, stats: dict | None,
+                          heartbeat: bool):
+    if not stats and not heartbeat:
+        return
+    if stats:
+        row = conn.execute(
+            'SELECT stats_json FROM live_sessions WHERE id=?',
+            (int(session_id),)).fetchone()
+        old = {}
+        if row:
+            try:
+                old = json.loads(row['stats_json'] or '{}')
+            except json.JSONDecodeError:
+                old = {}
+        old.update(stats)
+        conn.execute('UPDATE live_sessions SET stats_json=? WHERE id=?',
+                     (json.dumps(old, ensure_ascii=False), int(session_id)))
+    if heartbeat:
+        conn.execute(
+            'UPDATE live_sessions SET heartbeat_at=? WHERE id=?',
+            (time.time(), int(session_id)))
+
+
+def heartbeat_live_session(db_path: str, session_id: int,
+                           stats: dict | None = None):
+    conn = connect(db_path)
+    try:
+        _update_session_stats(conn, session_id, stats, heartbeat=True)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def end_live_session(db_path: str, session_id: int, status: str = 'ended',
+                     stats: dict | None = None):
+    conn = connect(db_path)
+    try:
+        _update_session_stats(conn, session_id, stats, heartbeat=False)
+        conn.execute(
+            "UPDATE live_sessions SET status=?, ended_at=? WHERE id=?",
+            (status, time.time(), int(session_id)))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def set_live_session_summary(db_path: str, session_id: int,
+                             summary: str) -> None:
+    """下播复盘正文（M4 场次历史展示/重新复盘）。"""
+    conn = connect(db_path)
+    try:
+        conn.execute('UPDATE live_sessions SET summary=? WHERE id=?',
+                     (str(summary or ''), int(session_id)))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_live_session(db_path: str, session_id: int) -> dict | None:
+    conn = connect(db_path)
+    try:
+        r = conn.execute(
+            'SELECT * FROM live_sessions WHERE id=?', (int(session_id),)
+        ).fetchone()
+        return _live_session_row(r) if r else None
+    finally:
+        conn.close()
+
+
+def list_live_sessions(db_path: str, room_id: str = '', status: str = '',
+                       limit: int = 50) -> list:
+    sql, args = 'SELECT * FROM live_sessions', []
+    where = []
+    if room_id:
+        where.append('room_id=?'); args.append(str(room_id))
+    if status:
+        where.append('status=?'); args.append(status)
+    if where:
+        sql += ' WHERE ' + ' AND '.join(where)
+    sql += ' ORDER BY id DESC LIMIT ?'
+    args.append(int(limit))
+    conn = connect(db_path)
+    try:
+        rows = conn.execute(sql, args).fetchall()
+        return [_live_session_row(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def running_live_session(db_path: str, room_id) -> dict | None:
+    """该房间最近一场 running（面板对账：还要结合 pid 存活/心跳新鲜度）。"""
+    rows = list_live_sessions(db_path, room_id=room_id,
+                              status='running', limit=1)
+    return rows[0] if rows else None
+
+
+def upsert_live_identity(db_path: str, bili_uid, name: str = '',
+                         inc_msg: int = 0):
+    """观众露面计数（M4 绑定面板的数据源）。调用方自己合并同批去重。"""
+    conn = connect(db_path)
+    try:
+        now = time.time()
+        # 先插 0 计数，统一由下面的 UPDATE 加 inc_msg（避免新行加两次）
+        conn.execute(
+            'INSERT OR IGNORE INTO live_identity (bili_uid, bili_name, '
+            'first_seen, last_seen, msg_count) VALUES (?,?,?,?,0)',
+            (str(bili_uid), str(name or ''), now, now))
+        conn.execute(
+            'UPDATE live_identity SET last_seen=?, '
+            'bili_name=CASE WHEN ? IS NULL OR ?=\'\' THEN bili_name ELSE ? END, '
+            'msg_count=msg_count+? WHERE bili_uid=?',
+            (now, str(name or ''), str(name or ''), str(name or ''),
+             int(inc_msg), str(bili_uid)))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _identity_row(r: sqlite3.Row) -> dict:
+    d = dict(r)
+    d['msg_count'] = int(d.get('msg_count') or 0)
+    d['linked'] = bool(d.get('qq'))
+    return d
+
+
+def list_live_identities(db_path: str, limit: int = 300) -> list:
+    """露面观众（最近在前）；面板绑定表数据源。"""
+    conn = connect(db_path)
+    try:
+        rows = conn.execute(
+            'SELECT * FROM live_identity ORDER BY last_seen DESC, rowid DESC '
+            'LIMIT ?', (int(limit),)).fetchall()
+        return [_identity_row(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def bind_live_identity(db_path: str, bili_uid, qq) -> dict:
+    """把 B 站观众 bili:<uid> 绑定到 QQ：单事务回填全部历史归属。
+
+    - live_identity.qq 落绑定（同一 QQ 只允许绑一个 B 站号，旧绑定让位）；
+    - messages.sender_id / memory_entries.user_id / commitments.owner_id
+      从 bili:<uid> 改写成 QQ；
+    - users 目录合并昵称与时间（QQ 行已存在则合并后删 bili 行，否则直接改键）。
+    返回各类回填条数。解绑不回移（历史继续挂在 QQ 名下）。
+    """
+    import re as _re
+    bili_uid = str(bili_uid).strip()
+    qq = str(qq).strip()
+    if not bili_uid or not _re.fullmatch(r'\d{5,12}', qq):
+        raise ValueError('QQ 号格式不对')
+    old_id = f'bili:{bili_uid}'
+    now = time.time()
+    conn = connect(db_path)
+    try:
+        row = conn.execute(
+            'SELECT 1 FROM live_identity WHERE bili_uid=?',
+            (bili_uid,)).fetchone()
+        if row is None:
+            raise KeyError(f'没有这个 B 站观众：{bili_uid}')
+        # 同一 QQ 的旧绑定让位（1:1）
+        conn.execute(
+            "UPDATE live_identity SET qq='', linked_at=0 WHERE qq=?",
+            (qq,))
+        conn.execute(
+            'UPDATE live_identity SET qq=?, linked_at=? WHERE bili_uid=?',
+            (qq, now, bili_uid))
+
+        c_msg = conn.execute(
+            'UPDATE messages SET sender_id=? WHERE sender_id=?',
+            (qq, old_id)).rowcount
+        c_mem = conn.execute(
+            'UPDATE memory_entries SET user_id=? WHERE user_id=?',
+            (qq, old_id)).rowcount
+        c_com = conn.execute(
+            'UPDATE commitments SET owner_id=? WHERE owner_id=?',
+            (qq, old_id)).rowcount
+
+        # users 目录合并
+        old_user = conn.execute(
+            'SELECT * FROM users WHERE user_id=?', (old_id,)).fetchone()
+        merged_user = False
+        if old_user is not None:
+            qq_user = conn.execute(
+                'SELECT * FROM users WHERE user_id=?', (qq,)).fetchone()
+            old_names = json.loads(old_user['names'] or '[]')
+            if qq_user is None:
+                conn.execute(
+                    'INSERT INTO users (user_id, names, first_seen, last_seen, '
+                    'last_group_id) VALUES (?,?,?,?,?)',
+                    (qq, old_user['names'],
+                     old_user['first_seen'], old_user['last_seen'],
+                     old_user['last_group_id'] or ''))
+            else:
+                qq_names = json.loads(qq_user['names'] or '[]')
+                for n in old_names:
+                    if n not in qq_names:
+                        qq_names.append(n)
+                conn.execute(
+                    'UPDATE users SET names=?, first_seen=?, last_seen=?, '
+                    'last_group_id=? WHERE user_id=?',
+                    (json.dumps(qq_names[:10], ensure_ascii=False),
+                     min(old_user['first_seen'], qq_user['first_seen']),
+                     max(old_user['last_seen'], qq_user['last_seen']),
+                     qq_user['last_group_id'] or old_user['last_group_id']
+                     or '', qq))
+                merged_user = True
+            conn.execute('DELETE FROM users WHERE user_id=?', (old_id,))
+        conn.commit()
+        return {'qq': qq, 'messages': c_msg, 'memories': c_mem,
+                'commitments': c_com, 'user_merged': merged_user}
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def unbind_live_identity(db_path: str, bili_uid) -> None:
+    """仅清绑定关系；历史归属留在 QQ 名下不回移。"""
+    conn = connect(db_path)
+    try:
+        conn.execute(
+            "UPDATE live_identity SET qq='', linked_at=0 WHERE bili_uid=?",
+            (str(bili_uid),))
+        conn.commit()
     finally:
         conn.close()

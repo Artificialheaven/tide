@@ -1,0 +1,457 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>DeepSeek 群AI · B站直播</title>
+<style>
+body{background:#1a1d23;color:#d7dae0;font:14px/1.6 "Microsoft YaHei",sans-serif;margin:0}
+nav{background:#22262e;padding:10px 20px;border-bottom:1px solid #333}
+nav a{color:#7aa2f7;margin-right:16px;text-decoration:none}
+.wrap{padding:20px;max-width:920px;margin:auto}
+fieldset{border:1px solid #333;border-radius:6px;margin-bottom:16px;padding:12px 16px}
+legend{color:#8b93a7;padding:0 6px}
+label{display:block;margin:8px 0}
+input,select,textarea{background:#22262e;color:#eceff4;border:1px solid #3b4252;border-radius:4px;padding:6px 8px;box-sizing:border-box}
+input[type=number],input[type=text],select{width:120px}
+textarea{width:100%;height:90px}
+input[type=checkbox]{width:auto;margin-right:6px}
+button{background:#5e81ac;color:#fff;border:0;border-radius:4px;padding:7px 16px;cursor:pointer;margin-right:8px}
+button.danger{background:#bf616a}
+button.ok{background:#a3be8c;color:#1a1d23}
+button:disabled{opacity:.45;cursor:default}
+.hint{color:#8b93a7;font-size:12px}
+.card{border:1px solid #333;border-radius:8px;padding:14px 18px;margin-bottom:18px;background:#1f232b}
+.card h3{margin:0 0 8px}
+.badge{display:inline-block;border-radius:10px;padding:1px 10px;font-size:12px;margin-left:8px}
+.b-run{background:#3b5323;color:#a3be8c}
+.b-stop{background:#4c3434;color:#d08770}
+.b-stale{background:#4c4434;color:#ebcb8b}
+.stat{color:#8b93a7;font-size:12px;margin-right:14px;white-space:nowrap}
+.row{display:flex;gap:14px;flex-wrap:wrap;align-items:center}
+pre.logs{background:#15171c;border:1px solid #2e333d;border-radius:6px;padding:10px;height:220px;
+  overflow:auto;font:12px/1.5 Consolas,monospace;white-space:pre-wrap;margin:10px 0 0}
+dialog{background:#22262e;color:#eceff4;border:1px solid #3b4252;border-radius:8px;padding:22px;width:340px}
+dialog::backdrop{background:rgba(0,0,0,.55)}
+dialog img{display:block;margin:10px auto;background:#fff;padding:8px;border-radius:6px;width:240px;height:240px}
+table{border-collapse:collapse;width:100%;font-size:13px}
+th,td{border-bottom:1px solid #2e333d;padding:5px 8px;text-align:left;vertical-align:top}
+th{color:#8b93a7;font-weight:normal}
+.tag{display:inline-block;background:#2d3340;border-radius:4px;padding:0 6px;font-size:12px;color:#a3be8c}
+.sess-body{background:#15171c;border-radius:6px;padding:10px;margin:6px 0;white-space:pre-wrap;
+  font-size:13px;max-height:260px;overflow:auto}
+</style>
+</head>
+<body>
+<nav>
+  <a href="/deepseek/dashboard?v={{ PLUGIN_VERSION }}">群开关</a>
+  <a href="/deepseek/group?v={{ PLUGIN_VERSION }}">群设置</a>
+  <a href="/deepseek/settings?v={{ PLUGIN_VERSION }}">全局设置</a>
+  <a href="/deepseek/mcp?v={{ PLUGIN_VERSION }}">MCP 工具</a>
+  <a href="/deepseek/memory?v={{ PLUGIN_VERSION }}">群友记忆</a>
+  <a href="/deepseek/runs?v={{ PLUGIN_VERSION }}">后台/轮询</a>
+  <a href="/deepseek/prompts?v={{ PLUGIN_VERSION }}">提示词</a>
+  <a href="/deepseek/live?v={{ PLUGIN_VERSION }}" style="color:#ebcb8b">B站直播</a>
+  <span class="hint" style="float:right">v{{ PLUGIN_VERSION }}</span>
+</nav>
+<div class="wrap">
+<h2>B 站直播 AI</h2>
+
+<fieldset>
+  <legend>直播账号凭据（与梗库导入脚本共用）</legend>
+  <div id="credInfo" class="hint">读取中……</div>
+  <div style="margin-top:10px">
+    <button type="button" id="bQr">扫码登录 / 换号</button>
+    <button type="button" class="danger" id="bCredDel">删除凭据</button>
+    <span class="hint">凭据存于 db/bili_credential.json（0600），直播脚本检测到更新会热加载</span>
+  </div>
+</fieldset>
+
+<fieldset>
+  <legend>添加直播间</legend>
+  <div class="row">
+    <input id="newRoom" type="text" placeholder="直播间号（短号/真实号）" style="width:240px">
+    <button type="button" id="bAdd">添加</button>
+    <span id="addState" class="hint"></span>
+  </div>
+</fieldset>
+
+<div id="rooms"></div>
+
+<details id="boxIdent" class="card" style="margin-top:22px">
+  <summary style="cursor:pointer;font-weight:bold">观众身份绑定（B 站 UID ↔ QQ，历史归属自动迁移）</summary>
+  <p class="hint" style="margin:8px 0">
+    绑定后该观众在直播中的发言、记忆、约定的归属会一次性改挂到对应 QQ
+    （messages / memory_entries / commitments/users 单事务回填，同 QQ 旧绑定自动让位）；
+    解绑只清关系，历史继续挂在 QQ 名下。
+  </p>
+  <table><thead><tr>
+    <th>B 站昵称</th><th>UID</th><th>弹幕/露面</th><th>绑定 QQ</th><th></th>
+  </tr></thead><tbody id="identBody"><tr><td colspan="5" class="hint">加载中……</td></tr></tbody></table>
+</details>
+
+<details id="boxSess" class="card" style="margin-top:14px">
+  <summary style="cursor:pointer;font-weight:bold">历史场次与下播复盘</summary>
+  <div id="sessList" class="hint" style="margin-top:8px">打开时加载……</div>
+</details>
+
+<dialog id="qrDialog">
+  <div style="text-align:center;font-weight:bold">用 B 站 App 扫码登录</div>
+  <img id="qrImg" alt="qrcode">
+  <div id="qrState" style="text-align:center" class="hint">等待扫码……</div>
+  <div style="text-align:center;margin-top:10px">
+    <button type="button" id="bQrClose">关闭</button>
+  </div>
+</dialog>
+</div>
+
+<script>
+const api = async (u, opt) => {
+  const r = await fetch('/deepseek'+u, opt);
+  return r.json().catch(()=>({ok:false,error:'bad json'}));
+};
+let PROVIDERS = [];
+let pollTimer = null;
+
+function esc(s){return String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+function fmtAgo(ts){
+  if(!ts) return '—';
+  const d = Math.max(0, Date.now()/1000 - ts);
+  return d < 60 ? Math.floor(d)+' 秒前' : d < 3600 ? Math.floor(d/60)+' 分钟前'
+       : Math.floor(d/3600)+' 小时前';
+}
+function fmtClock(ts){return ts ? new Date(ts*1000).toLocaleString('zh-CN',{hour12:false}) : '—';}
+
+function modelOptions(cur){
+  let html = '<option value="">默认模型（跟全局）</option>';
+  for(const pr of PROVIDERS){
+    for(const m of (pr.models||[])){
+      const v = `${pr.id}/${m.id}`;
+      html += `<option value="${esc(v)}" ${v===cur?'selected':''}>${esc(pr.label||pr.id)} / ${esc(m.label||m.id)}</option>`;
+    }
+  }
+  if(cur && !html.includes(`value="${esc(cur)}"`))
+    html += `<option value="${esc(cur)}" selected>${esc(cur)}（悬空）</option>`;
+  return html;
+}
+
+function badgeHtml(item){
+  return item.running
+      ? (item.stale ? '<span class="badge b-stale">心跳超时</span>'
+                    : '<span class="badge b-run">运行中</span>')
+      : '<span class="badge b-stop">已停止</span>';
+}
+
+function statsHtml(item){
+  const s = item.session, st = (s&&s.stats)||{};
+  return `
+      <span class="stat">pid：${item.running ? item.pid||'启动中' : '—'}</span>
+      <span class="stat">心跳：${item.running ? fmtAgo(s.heartbeat_at) : '—'}</span>
+      <span class="stat">弹幕：${st.danmaku??0}</span>
+      <span class="stat">AI 轮：${st.turns??0}</span>
+      <span class="stat">已发弹幕：${st.sent??0}</span>
+      <span class="stat">队列：${st.queue??0}</span>
+      <span class="stat">最近弹幕：${esc(st.last_dm||'—')}</span>`;
+}
+
+function roomCard(item){
+  const r = item.room, s = item.session;
+  const checked = v => v ? 'checked' : '';
+  return `
+  <div class="card" data-room="${esc(r.room_id)}">
+    <h3>直播间 ${esc(r.room_id)} <span class="js-badge">${badgeHtml(item)}</span></h3>
+    <div class="row js-stats" style="margin-bottom:8px">${statsHtml(item)}</div>
+    <div class="f">
+      <label>聚合间隔（秒，≥3）<input type="number" min="3" value="${r.batch_seconds}" data-k="batch_seconds"></label>
+      <label>单批弹幕上限 <input type="number" min="1" value="${r.batch_max}" data-k="batch_max"></label>
+      <label><input type="checkbox" ${checked(r.immediate_sc)} data-k="immediate_sc">SC 立即触发一轮</label>
+      <label><input type="checkbox" ${checked(r.immediate_gift)} data-k="immediate_gift">达阈值礼物立即触发</label>
+      <label>礼物阈值（元，0=不限）<input type="number" min="0" value="${r.gift_threshold}" data-k="gift_threshold"></label>
+      <label>本场模型 <select data-k="model_route">${modelOptions(r.model_route)}</select></label>
+      <label>本直播间人设（留空继承全局默认人设）
+        <textarea data-k="persona" placeholder="例如：你是橘雪莉，正在自己的 B 站直播间陪观众聊天……">${esc(item.persona||'')}</textarea></label>
+      <div style="margin-top:8px">
+        <button type="button" class="ok b-save">保存设置</button>
+        <button type="button" class="b-start" ${item.running?'disabled':''}>启动</button>
+        <button type="button" class="danger b-stop" ${item.running?'':'disabled'}>停止</button>
+        <button type="button" class="danger b-kill" ${item.running&&item.can_force_stop?'':'disabled'}>强制结束</button>
+        <span class="hint b-msg"></span>
+      </div>
+    </div>
+    <details data-sid="${s? s.id : ''}" ${item.running?'open':''} style="margin-top:10px">
+      <summary class="hint js-summary">运行日志${s?`（场次 #${s.id}，开始 ${fmtClock(s.started_at)}）`:''}</summary>
+      <pre class="logs">（运行中自动刷新）</pre>
+    </details>
+  </div>`;
+}
+
+function structureSig(items){
+  return items.map(it => [it.room.room_id, it.running?1:0, it.stale?1:0,
+    it.session? it.session.id : 0, it.can_force_stop?1:0].join('/')).join('|');
+}
+
+let lastSig = '';
+async function refresh(){
+  const rs = await api('/api/live/snapshot');
+  const box = document.getElementById('rooms');
+  if(!rs.ok){box.innerHTML=
+    `<span class="hint">加载失败：${esc(rs.error)}</span>`;return;}
+  const items = rs.rooms||[];
+  const sig = structureSig(items);
+  if(sig !== lastSig){
+    // 只在房间增删 / 场次状态切换时重建表单，避免轮询打断输入焦点
+    const openRooms = new Set([...box.querySelectorAll('details[open]')]
+      .map(d=>d.closest('.card')?.dataset.room));
+    box.innerHTML = items.map(roomCard).join('')
+      || '<span class="hint">还没有添加直播间。</span>';
+    for(const card of box.querySelectorAll('.card')){
+      if(openRooms.has(card.dataset.room))
+        card.querySelector('details')?.setAttribute('open','');
+      bindCard(card);
+    }
+    lastSig = sig;
+  }
+  // 动态部分原地刷新（不动输入控件）
+  for(const item of items){
+    const card = box.querySelector(`.card[data-room="${CSS.escape(item.room.room_id)}"]`);
+    if(!card) continue;
+    card.querySelector('.js-badge').innerHTML = badgeHtml(item);
+    card.querySelector('.js-stats').innerHTML = statsHtml(item);
+    const s = item.session;
+    card.querySelector('.b-start').disabled = item.running;
+    card.querySelector('.b-stop').disabled = !item.running;
+    card.querySelector('.b-kill').disabled = !(item.running && item.can_force_stop);
+    const det = card.querySelector('details');
+    det.dataset.sid = s ? s.id : '';
+    card.querySelector('.js-summary').textContent = s
+      ? `运行日志（场次 #${s.id}，开始 ${fmtClock(s.started_at)}）`
+      : '运行日志';
+    if(item.running && det.hasAttribute('open')) loadLogs(card);
+  }
+}
+
+function bindCard(card){
+  const room = card.dataset.room, msg = card.querySelector('.b-msg');
+  const say = t => {msg.textContent = t||'';};
+  card.querySelector('.b-save').onclick = async () => {
+    const body = {};
+    card.querySelectorAll('[data-k]').forEach(el=>{
+      const k = el.dataset.k;
+      body[k] = el.type==='checkbox' ? (el.checked?1:0) : el.value;
+    });
+    say('保存中…');
+    const r = await api(`/api/live/rooms/${encodeURIComponent(room)}`,{
+      method:'PUT',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(body)});
+    say(r.ok?'已保存（运行中的脚本 5 秒内热生效）':'保存失败：'+esc(r.error));
+    refresh();
+  };
+  card.querySelector('.b-start').onclick = async () => {
+    say('启动中…');
+    const r = await api(`/api/live/rooms/${encodeURIComponent(room)}/start`,{method:'POST'});
+    say(r.ok?`已启动 pid=${r.pid}`:'启动失败：'+esc(r.error));
+    refresh();
+  };
+  card.querySelector('.b-stop').onclick = async () => {
+    say('已请求停止，等脚本冲刷队列后退出…');
+    await api(`/api/live/rooms/${encodeURIComponent(room)}/stop`,{
+      method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+    refresh();
+  };
+  card.querySelector('.b-kill').onclick = async () => {
+    if(!confirm('强制结束会立即杀掉进程，队列里未发的弹幕会丢失。确定？'))return;
+    await api(`/api/live/rooms/${encodeURIComponent(room)}/stop`,{
+      method:'POST',headers:{'Content-Type':'application/json'},body:'{"force":1}'});
+    refresh();
+  };
+}
+
+async function loadLogs(card){
+  const room = card.dataset.room;
+  // session id 不在卡片上暴露，直接从最新 snapshot 拿太绕：日志端点要 sid，
+  // 卡片渲染时把 sid 放进 details 的 data 属性
+  const sid = card.querySelector('details').dataset.sid;
+  if(!sid) return;
+  const pre = card.querySelector('pre.logs');
+  const r = await api(`/api/live/sessions/${sid}/logs`);
+  if(r.ok && r.logs){
+    const atBottom = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 20;
+    pre.textContent = r.logs.trim() || '（暂无输出）';
+    if(atBottom) pre.scrollTop = pre.scrollHeight;
+  }
+}
+
+async function refreshCred(force){
+  const el = document.getElementById('credInfo');
+  const r = await api('/api/live/credential'+(force?'?force=1':''));
+  if(!r.ok){el.textContent='凭据状态读取失败：'+r.error;return;}
+  const i = r.info||{};
+  if(!i.logged_in){el.innerHTML='<b style="color:#d08770">未登录</b>，启动直播前请先扫码。';}
+  else if(i.valid===false){el.innerHTML=`已保存 uid=${esc(i.uid)}，但<b style="color:#d08770">校验失败（可能过期）</b>，建议重新扫码。`;}
+  else{el.innerHTML=`已登录：<b>${esc(i.uname||'')}</b>（uid ${esc(i.uid)}）${i.uname?'':'（未强制校验）'}
+    <button type="button" id="bCredCheck" style="padding:2px 10px;margin-left:8px">校验</button>`;
+    document.getElementById('bCredCheck').onclick=()=>refreshCred(true);}
+}
+
+// ── 扫码弹窗 ──
+const dlg = document.getElementById('qrDialog');
+document.getElementById('bQr').onclick = async () => {
+  document.getElementById('qrState').textContent = '生成二维码……';
+  dlg.showModal();
+  const r = await api('/api/live/credential/qr/start',{method:'POST'});
+  if(!r.ok){document.getElementById('qrState').textContent='失败：'+r.error;return;}
+  document.getElementById('qrImg').src = 'data:image/png;base64,'+r.png_b64;
+  document.getElementById('qrState').textContent = '等待扫码……';
+  pollTimer = setInterval(()=>pollQr(r.sid), 1500);
+};
+async function pollQr(sid){
+  const st = document.getElementById('qrState');
+  const r = await api(`/api/live/credential/qr/poll?sid=${encodeURIComponent(sid)}`);
+  if(!r.ok){st.textContent='轮询失败：'+r.error;return;}
+  if(r.state==='scan'){st.textContent='已扫码，请在手机上确认';}
+  else if(r.state==='conf'){st.textContent='已确认，登录中……';}
+  else if(r.state==='timeout'){st.textContent='二维码超时，请重新打开';clearInterval(pollTimer);}
+  else if(r.state==='expired'){st.textContent='会话过期，请重新打开';clearInterval(pollTimer);}
+  else if(r.state==='done'){
+    clearInterval(pollTimer);
+    st.innerHTML = `登录成功：${esc(r.uname||'')}（uid ${esc(r.uid)}）`;
+    setTimeout(()=>{dlg.close();refreshCred(true);}, 1200);
+  } else if(r.state==='error'){st.textContent='错误：'+r.error;clearInterval(pollTimer);}
+}
+document.getElementById('bQrClose').onclick=()=>{clearInterval(pollTimer);dlg.close();};
+document.getElementById('bCredDel').onclick=async()=>{
+  if(!confirm('删除已保存的 B 站凭据？'))return;
+  await api('/api/live/credential',{method:'DELETE'});
+  refreshCred(false);
+};
+document.getElementById('bAdd').onclick=async()=>{
+  const v = document.getElementById('newRoom').value.trim();
+  const el = document.getElementById('addState');
+  if(!v)return;
+  el.textContent='解析房间中……';
+  const r = await api('/api/live/rooms',{method:'POST',
+    headers:{'Content-Type':'application/json'},body:JSON.stringify({room:v})});
+  el.textContent = r.ok
+    ? (String(v)!==String(r.room_id)?`已添加：真实房间号 ${r.room_id}`:`已添加房间 ${r.room_id}`)
+    : '失败：'+r.error;
+  document.getElementById('newRoom').value='';
+  refresh();
+};
+
+// ── M4：观众身份绑定 ──
+let OWNER_QQ = 0;
+async function refreshIdent(){
+  const box = document.getElementById('boxIdent');
+  if(!box.open) return;
+  const r = await api('/api/live/identities');
+  if(!r.ok) return;
+  OWNER_QQ = r.owner_qq||0;
+  const body = document.getElementById('identBody');
+  const rows = r.identities||[];
+  if(!rows.length){
+    body.innerHTML = '<tr><td colspan="5" class="hint">还没有露面观众（直播过程中自动登记）。</td></tr>';
+    return;
+  }
+  body.innerHTML = rows.map(it => `
+    <tr data-uid="${esc(it.bili_uid)}">
+      <td>${esc(it.bili_name||'（无名）')}</td>
+      <td class="hint">${esc(it.bili_uid)}</td>
+      <td>${it.msg_count||0}</td>
+      <td><input class="i-qq" type="text" value="${esc(it.qq||'')}" placeholder="QQ 号"
+            style="width:130px" ${it.qq?'':''}></td>
+      <td>${it.qq
+        ? '<button type="button" class="b-unbind danger" style="padding:3px 10px">解绑</button>'
+        : '<button type="button" class="b-bind" style="padding:3px 10px">绑定</button>'}
+        <span class="i-msg hint"></span></td>
+    </tr>`).join('');
+  body.querySelectorAll('tr[data-uid]').forEach(tr=>{
+    const uid = tr.dataset.uid, msg = tr.querySelector('.i-msg');
+    const qqInput = tr.querySelector('.i-qq');
+    const btnBind = tr.querySelector('.b-bind'), btnUn = tr.querySelector('.b-unbind');
+    if(btnBind) btnBind.onclick = async ()=>{
+      const qq = qqInput.value.trim();
+      if(!/^\d{5,12}$/.test(qq)){msg.textContent='QQ 号格式不对';return;}
+      if(OWNER_QQ && Number(qq)===OWNER_QQ
+         && !confirm('你正在把这个 B 站号绑定到主人 QQ。绑定后该观众在直播里说的话会被当作主人本人的历史，确定？'))
+        return;
+      msg.textContent='回填中…';
+      const r = await api(`/api/live/identities/${encodeURIComponent(uid)}/bind`,{
+        method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({qq})});
+      if(r.ok){
+        const c = r.counts||{};
+        msg.innerHTML = `已迁移：消息 ${c.messages??0} / 记忆 ${c.memories??0} / 约定 ${c.commitments??0}`
+          + (r.is_owner?' <b style="color:#d08770">（主人 QQ）</b>':'');
+        await new Promise(r=>setTimeout(r,1200));
+        refreshIdent();
+      } else msg.textContent = '失败：'+esc(r.error);
+    };
+    if(btnUn) btnUn.onclick = async ()=>{
+      if(!confirm('解绑后历史归属仍留在该 QQ 名下（不回移），确定？'))return;
+      const r = await api(`/api/live/identities/${encodeURIComponent(uid)}/bind`,
+        {method:'DELETE'});
+      if(r.ok) refreshIdent(); else msg.textContent='失败：'+esc(r.error);
+    };
+  });
+}
+
+// ── M4：历史场次 ──
+const SESS_STATUS = {running:'运行中', ended:'已结束', crashed:'崩溃', stopped:'强杀'};
+function fmtDur(s){
+  if(!s) return '—';
+  const m = Math.round(s/60);
+  return m<60 ? m+' 分钟' : Math.floor(m/60)+' 小时 '+(m%60)+' 分';
+}
+async function refreshSessions(){
+  const box = document.getElementById('boxSess');
+  if(!box.open) return;
+  const r = await api('/api/live/sessions?limit=30');
+  if(!r.ok) return;
+  const list = document.getElementById('sessList');
+  const ss = r.sessions||[];
+  if(!ss.length){list.className='hint';list.textContent='暂无场次。';return;}
+  list.className='';
+  list.innerHTML = ss.map(s=>{
+    const st = s.stats||{};
+    const dur = s.ended_at ? s.ended_at - s.started_at : 0;
+    return `<div class="card" style="margin-bottom:10px" data-sid="${s.id}">
+      <div class="row">
+        <b>房间 ${esc(s.room_id)}</b>
+        <span class="tag">${esc(SESS_STATUS[s.status]||s.status)}</span>
+        <span class="hint">${fmtClock(s.started_at)} · ${fmtDur(dur)}</span>
+        <span class="hint">弹幕 ${st.danmaku??0} · AI 轮 ${st.turns??0} · 已发 ${st.sent??0}
+          ${st.sc?('· SC '+st.sc):''}${st.gift?('· 礼物 '+st.gift):''}</span>
+        <button type="button" class="b-resum" style="padding:2px 10px;margin-left:auto"
+          ${s.status==='running'?'disabled':''}>重新复盘</button>
+        <span class="s-msg hint"></span>
+      </div>
+      <div class="sess-body j-summary" style="display:${s.summary?'block':'none'}">${esc(s.summary||'')}</div>
+    </div>`;
+  }).join('');
+  list.querySelectorAll('[data-sid]').forEach(card=>{
+    card.querySelector('.b-resum').onclick = async ()=>{
+      const msg = card.querySelector('.s-msg');
+      msg.textContent = '复盘中（便宜模型，约 10~30 秒）…';
+      const r = await api(`/api/live/sessions/${card.dataset.sid}/resummarize`,
+        {method:'POST'});
+      if(r.ok){
+        const body = card.querySelector('.j-summary');
+        body.style.display='block'; body.textContent = r.summary||'';
+        msg.textContent = '已更新';
+      } else msg.textContent = '失败：'+esc(r.error);
+    };
+  });
+}
+
+(async function init(){
+  const rp = await api('/api/llm-providers');
+  PROVIDERS = rp.providers||[];
+  document.getElementById('boxIdent').addEventListener('toggle', refreshIdent);
+  document.getElementById('boxSess').addEventListener('toggle', refreshSessions);
+  await refreshCred(false);
+  await refresh();
+  setInterval(refresh, 4000);
+  setInterval(()=>{ refreshIdent(); refreshSessions(); }, 8000);
+})();
+</script>
+</body>
+</html>

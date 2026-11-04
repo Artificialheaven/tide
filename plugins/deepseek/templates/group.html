@@ -27,6 +27,7 @@ button{background:#5e81ac;color:#fff;border:0;border-radius:4px;padding:7px 16px
   <a href="/deepseek/memory?v={{ PLUGIN_VERSION }}">群友记忆</a>
   <a href="/deepseek/runs?v={{ PLUGIN_VERSION }}">后台/轮询</a>
   <a href="/deepseek/prompts?v={{ PLUGIN_VERSION }}">提示词</a>
+  <a href="/deepseek/live?v={{ PLUGIN_VERSION }}">B站直播</a>
   <span class="hint" style="float:right">v{{ PLUGIN_VERSION }}</span>
 </nav>
 <div class="wrap">
@@ -64,6 +65,11 @@ button{background:#5e81ac;color:#fff;border:0;border-radius:4px;padding:7px 16px
   <label>截尾条数（空=继承）<input name="tail_keep_msgs" type="number" min="2" placeholder="继承"></label>
   <label>滑窗轮数（空=继承）<input name="window_rounds" type="number" placeholder="继承"></label>
   <label>滑窗字符预算（空=继承）<input name="char_budget" type="number" placeholder="继承"></label>
+  <label>摘要最少新消息数（空=继承）<input name="summary_min_new_msgs" type="number" placeholder="继承"></label>
+  <label>摘要最少新字符数（空=继承）<input name="summary_min_new_chars" type="number" placeholder="继承"></label>
+  <label>摘要最短间隔秒（空=继承）<input name="summary_min_interval_sec" type="number" placeholder="继承"></label>
+  <label>摘要强制条数（空=继承）<input name="summary_force_msgs" type="number" placeholder="继承"></label>
+  <label>摘要强制字符数（空=继承）<input name="summary_force_chars" type="number" placeholder="继承"></label>
   <label>背景消息条数（空=继承）<input name="ambient_context_n" type="number" placeholder="继承"></label>
   <label>长跑汇报间隔（工具轮，空=继承）<input name="loop_every_rounds" type="number" min="1" placeholder="继承"></label>
 </fieldset>
@@ -144,6 +150,10 @@ async function loadGroup(){
   F.tail_keep_msgs.value = st.tail_keep_msgs ?? '';
   F.window_rounds.value = st.window_rounds ?? '';
   F.char_budget.value = st.char_budget ?? '';
+  for (const k of ['summary_min_new_msgs','summary_min_new_chars',
+                   'summary_min_interval_sec','summary_force_msgs','summary_force_chars']){
+    F[k].value = st[k] ?? '';
+  }
   F.ambient_context_n.value = st.ambient_context_n ?? '';
   F.loop_every_rounds.value = st.loop_every_rounds ?? '';
   overrides = g.tools||{};
@@ -302,7 +312,9 @@ document.getElementById('f').onsubmit = async e=>{
     const v=el.value;
     if (v!=='') st[k] = (v==='true')?true:(v==='false'?false:v);
   }
-  for (const k of ['window_rounds','char_budget','ambient_context_n','loop_every_rounds','tail_keep_msgs']){
+  for (const k of ['window_rounds','char_budget','ambient_context_n','loop_every_rounds','tail_keep_msgs',
+                   'summary_min_new_msgs','summary_min_new_chars','summary_min_interval_sec',
+                   'summary_force_msgs','summary_force_chars']){
     const v=F[k].value.trim();
     if (v) st[k]=Number(v);
   }

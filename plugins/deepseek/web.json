@@ -2,6 +2,7 @@
     "config": {
         "owner_qq": {"type": "int", "label": "主人QQ", "default": 3399752707},
         "enable_thinking": {"type": "checkbox", "label": "默认开启深度思考", "default": false},
+        "cheap_thinking_on": {"type": "checkbox", "label": "便宜模型也开启思考（判官/摘要/记忆抽取/心情/风格默认关思考省钱；若便宜模型始终思考不支持关闭，才需要打开）", "default": false},
         "command_prefix": {"type": "string", "label": "指令前缀", "default": "/ai"},
         "aliases": {"type": "string", "label": "全局称呼词（逗号分隔）", "default": ""},
         "window_rounds": {"type": "int", "label": "滑窗轮数", "default": 12},

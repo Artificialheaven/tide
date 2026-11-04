@@ -238,6 +238,21 @@ class JobManager:
         jid = job['id']
         tid = str(job['target_id'])
         if job['target_type'] == 'group':
+            if tid.startswith('bili:'):
+                # B 站直播虚拟群只能由直播脚本进程（FakeBot）投递，
+                # OneBot/QQ 通道物理不可达；主 bot 的定时任务一律不接：
+                # 单次直接停用，循环顺延（等脚本进程——它不跑 scheduler，
+                # 实际上直播内提醒目前不支持，这里只保证不报错刷屏）。
+                note = '直播虚拟群不支持定时投递'
+                if job['mode'] == 'once':
+                    await asyncio.to_thread(
+                        storage.job_mark_run, self.db_path, jid, None,
+                        False, note)
+                else:
+                    await asyncio.to_thread(
+                        storage.job_mark_run, self.db_path, jid,
+                        next_recurring(job), True, note)
+                return
             g = await asyncio.to_thread(storage.get_group, self.db_path, tid)
             if not g or not g['enabled']:
                 # 目标群关了：单次任务直接停用；循环任务顺延，等重新开启

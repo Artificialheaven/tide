@@ -42,7 +42,10 @@ DEFAULTS = {
     "extract_model": _DEFAULT_ROUTE,
     "mood_model": _DEFAULT_ROUTE,
     "style_model": _DEFAULT_ROUTE,
-    "enable_thinking": False,            # 深度思考总开关（judge/summary/extract 恒关）
+    "enable_thinking": False,            # 深度思考总开关（主对话 deepseek-chat）
+    # 便宜调用（判官/摘要/记忆抽取/心情/风格）默认恒关思考省钱；
+    # 始终思考的模型（如 glm-5.3-flash）不支持关闭，需开此开关
+    "cheap_thinking_on": False,
     "default_persona": "",               # 全局默认人设（后台 textarea）
     "command_prefix": "/ai",
     "aliases": "",                       # 全局称呼词，逗号分隔
@@ -271,12 +274,13 @@ DEFAULTS = {
 
 # 群 settings_json 允许覆盖的键白名单
 GROUP_OVERRIDABLE = frozenset({
-    "model", "enable_thinking",
+    "model", "enable_thinking", "cheap_thinking_on",
     "heuristic_on", "judge_on",
     "window_rounds", "char_budget",
     "summary_mode", "tail_keep_msgs",
     "summary_min_new_msgs", "summary_min_new_chars",
     "summary_min_interval_sec",
+    "summary_force_msgs", "summary_force_chars",
     "ambient_context_on", "ambient_context_n",
     "split_reply", "split_max_len", "split_min_len",
     "split_delay_min_ms", "split_delay_max_ms",
@@ -343,7 +347,8 @@ _INT_KEYS = {
     "loop_keep_rounds", "loop_idle_turn_limit",
 }
 _BOOL_KEYS = {
-    "enable_thinking", "heuristic_on", "judge_on", "judge_fail_open",
+    "enable_thinking", "cheap_thinking_on", "heuristic_on", "judge_on",
+    "judge_fail_open",
     "mcp_watchdog", "split_reply", "real_at_on", "memory_on", "learn_style_on",
     "reminder_on", "scheduler_on", "vision_on", "file_parse_on",
     "voice_asr_on", "inbound_video_on",

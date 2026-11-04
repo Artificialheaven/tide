@@ -82,8 +82,16 @@ def test_resolve_group_overrides_mode_and_rejects_bogus():
 
 def test_resolve_group_drops_non_overridable():
     base = config.merge_config({})
-    eff = config.resolve_group(base, {'summary_force_msgs': 1})
-    assert eff['summary_force_msgs'] == base['summary_force_msgs']
+    eff = config.resolve_group(base, {'owner_qq': 1})
+    assert eff['owner_qq'] == base['owner_qq']
+
+
+def test_resolve_group_overrides_force_thresholds():
+    base = config.merge_config({})
+    eff = config.resolve_group(base, {'summary_force_msgs': '80',
+                                      'summary_force_chars': 20000})
+    assert eff['summary_force_msgs'] == 80
+    assert eff['summary_force_chars'] == 20000
 
 
 # ── 摘要锚点单调更新 ──────────────────────────────────────────────
