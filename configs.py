@@ -25,7 +25,7 @@ default_config = {
     # Web 管理面板登录密码；留空则回退使用 token（旧配置兼容）
     "web_admin_token": "",
     "plugin_venv_python_version": "auto",
-    "max_reconnect_attempts": 0,
+    "max_reconnect_attempts": 10,  # 重连上限；0=无限重试
     "reconnect_base_delay": 2,
     "reconnect_max_delay": 60,
     # NapCat HTTP 接口，deepseek 的 QZone 功能用作兜底（插件配置优先）

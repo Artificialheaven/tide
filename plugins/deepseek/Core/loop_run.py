@@ -15,6 +15,8 @@ import asyncio
 import datetime as _dt
 import traceback
 
+from utils.asyncutil import wait_resilient
+
 from . import storage
 from .config import resolve_group
 from .models import ParsedMessage
@@ -152,10 +154,10 @@ class LoopManager:
         for t in tasks:
             t.cancel()
         if tasks:
-            # 外部 cancel 会让被取消任务内部重抛 CancelledError（BaseException），
-            # 必须用 gather(return_exceptions=True) 兜住，不能裸 except Exception
-            await asyncio.wait_for(
-                asyncio.gather(*tasks, return_exceptions=True), timeout=3)
+            # return_exceptions 兜子任务的 CancelledError（BaseException）；
+            # wait_resilient 再隔离外层取消，保证不向 on_stop 冒泡
+            await wait_resilient(
+                asyncio.gather(*tasks, return_exceptions=True), timeout=3.0)
 
     def reconcile(self) -> int:
         """插件启动：内存 worker 全没了，残留 running 置 interrupted。"""

@@ -79,6 +79,9 @@ DEFAULTS = {
     "max_tokens": 30000,                 # 推理模型思考链也占输出配额；上限只影响可用额度，不按上限计费
     "max_tool_rounds": 50,               # 桌面远控类任务天然长串行（截图/点击/输入/等待）
     "request_timeout": 60,
+    "llm_retry_max": 3,                  # 模型 API 瞬时失败的重试次数（0=不重试）
+    "llm_retry_base_ms": 1000,           # 指数退避首延迟；第 n 次重试等待 base*2^n
+    "llm_retry_max_ms": 20000,           # 单次退避等待上限（默认 20s）
     "tool_timeout": 30,
     "mcp_timeout": 30,
 
@@ -304,6 +307,7 @@ _INT_KEYS = {
     "summary_min_interval_sec", "summary_force_msgs", "summary_force_chars",
     "ambient_context_n",
     "judge_history", "max_tokens", "max_tool_rounds", "request_timeout",
+    "llm_retry_max", "llm_retry_base_ms", "llm_retry_max_ms",
     "tool_timeout", "mcp_timeout", "mcp_media_ttl_hours",
     "mcp_media_max_kb", "send_image_max_kb",
     "read_file_max_kb", "read_file_max_chars", "read_page_max_chars",

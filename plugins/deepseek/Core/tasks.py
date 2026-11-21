@@ -11,6 +11,8 @@ import asyncio
 import datetime as _dt
 import time
 
+from utils.asyncutil import cancel_task
+
 from . import storage
 
 _DUE_FORMATS = ('%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M', '%Y-%m-%d')
@@ -167,12 +169,8 @@ class TaskManager:
     async def stop(self):
         task = self._reminder_task
         self._reminder_task = None
-        if task is not None:
-            task.cancel()
-            try:
-                await asyncio.wait_for(asyncio.shield(task), timeout=3)
-            except Exception:
-                pass
+        # cancel + 有界等待；外层 CancelledError 也不冒泡，保证 on_stop 后续段可达
+        await cancel_task(task, timeout=3.0)
 
     async def _loop(self, plugin):
         while True:

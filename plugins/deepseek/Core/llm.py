@@ -5,10 +5,14 @@ judge/summary/extract 恒关深度思考，用便宜参数省钱。
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+import random
 import re
 import uuid
+
+from utils.asyncutil import wait_resilient
 
 from . import config as cfg_mod, context as ctx_mod, prompts as prompts_mod
 from .config import ROUTE_LABELS
@@ -122,6 +126,8 @@ class LLMClient:
         self._opencode_session = uuid.uuid4().hex
         # 插件构造完 PromptStore 后挂上来；None 时全部用 prompts.py 默认文案
         self.prompts = None
+        # 插件把 self.log 挂上来后可记录瞬时失败重试；未挂时静默
+        self.log = None
 
     def _prompt(self, key: str) -> str:
         """后台模型系统提示词：提示词页覆盖优先，缺省走注册表默认值。"""
@@ -171,13 +177,13 @@ class LLMClient:
             pass
 
     async def aclose(self):
-        for client in list(self._clients.values()):
-            try:
-                await client.close()
-            except Exception:
-                pass
-        self._clients = {}
-        self._sigs = {}
+        try:
+            for client in list(self._clients.values()):
+                # 单个 close 有界等待且隔离外层取消，坏 client 不连累其余关闭
+                await wait_resilient(client.close(), timeout=5.0)
+        finally:
+            self._clients = {}
+            self._sigs = {}
 
     def prune_clients(self, active_ids) -> None:
         """配置里删掉服务商后，清掉对应缓存客户端（best-effort）。"""
@@ -232,13 +238,43 @@ class LLMClient:
             return await client.chat.completions.create(
                 timeout=timeout or float(cfg.get('request_timeout', 60)), **kwargs)
 
+        def _retry_delay(attempt: int) -> float:
+            """指数退避：base * 2^attempt，封顶 cap，带轻微抖动。"""
+            base_ms = max(0, int(cfg.get('llm_retry_base_ms', 1000) or 0))
+            cap_ms = max(0, int(cfg.get('llm_retry_max_ms', 20000) or 0))
+            delay = base_ms / 1000.0 * (2 ** attempt)
+            if cap_ms:
+                delay = min(delay, cap_ms / 1000.0)
+            # 抖动：多群同时失败时错开重试，避免一起撞限流
+            return delay * random.uniform(0.8, 1.2)
+
+        async def _call_with_retry():
+            # 模型 API 调用失败（网络/超时/限流/5xx）按指数退避重试；
+            # 业务错误（鉴权/参数/上下文超长）重试无意义，立即上抛，
+            # 交给调用方各自的处理路径（如长跑上下文压缩重试）
+            max_retries = max(0, int(cfg.get('llm_retry_max', 3) or 0))
+            for attempt in range(max_retries + 1):
+                try:
+                    return await _call()
+                except Exception as e:
+                    if (attempt >= max_retries
+                            or not _is_transient_error(e)):
+                        raise
+                    delay = _retry_delay(attempt)
+                    log = getattr(self, 'log', None)
+                    if callable(log):
+                        log(f'模型 API 调用失败（{type(e).__name__}），'
+                            f'{delay:.1f}s 后第 {attempt + 1}/{max_retries} '
+                            f'次重试: {e}', 'warn')
+                    await asyncio.sleep(delay)
+
         try:
-            resp = await _call()
+            resp = await _call_with_retry()
         except Exception as e:
             # 思考参数不被服务端接受时，摘掉重式一次
             if 'extra_body' in kwargs and _is_param_error(e):
                 kwargs.pop('extra_body', None)
-                resp = await _call()
+                resp = await _call_with_retry()
             else:
                 raise
 
@@ -536,6 +572,31 @@ class LLMClient:
             temperature=0.3, kind='style',
             no_thinking=not cfg.get('cheap_thinking_on', False))
         return result.content.strip(), result.usage
+
+
+def _is_transient_error(exc) -> bool:
+    """网络抖动/限流/5xx 可重试；鉴权、参数、上下文超长等业务错误不重试。"""
+    try:
+        import openai
+        if isinstance(exc, (openai.APITimeoutError, openai.APIConnectionError,
+                            openai.RateLimitError, openai.InternalServerError)):
+            return True
+        if isinstance(exc, openai.APIStatusError):
+            status = int(getattr(exc, 'status_code', 0) or 0)
+            return status == 429 or status >= 500
+    except Exception:
+        pass
+    # fake client（测试/自建中转）抛原生异常时的兜底
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError, ConnectionError)):
+        return True
+    name = type(exc).__name__.lower()
+    if any(s in name for s in ('timeout', 'connection', 'ratelimit')):
+        return True
+    s = str(exc).lower()
+    return any(text in s for text in (
+        'timed out', 'timeout', 'connection reset', 'connection refused',
+        'rate limit', 'too many requests', ' 429', ' 500', ' 502',
+        ' 503', ' 504'))
 
 
 def _is_param_error(exc) -> bool:

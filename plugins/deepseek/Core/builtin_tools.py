@@ -85,6 +85,7 @@ TOOL_KEYS = {
     'qzone_delete': 'qzone.delete',
     'qzone_recent': 'qzone.recent',
     'read_message_image': 'message.read_image',
+    'save_message_image': 'message.save_image',
     'read_forward': 'message.read_forward',
     'meme_lookup': 'meme.lookup',
 }
@@ -432,9 +433,13 @@ _SCHEMAS = [
         'function': {
             'name': 'read_image',
             'description': (
-                '读取工作区里的图片（如 MCP 截图工具保存的截图），把图片本身送进你的'
-                '视觉输入，你就能真正"看见"它的内容。想看图就调这个，不要猜。'
-                'path 必须严格照抄工具结果提示里给的完整文件名（含 mcp/ 前缀）。'
+                '读取本群工作区里已存在的图片文件（如 MCP 截图、save_message_image '
+                '存下来的图），把图片本身送进你的视觉输入，你就能真正"看见"它的内容。'
+                '想看图就调这个，不要猜。path 必须是工作区相对路径，严格照抄工具结果'
+                '提示里给的完整文件名（含 mcp/ 前缀）。'
+                '本工具不读聊天消息里的图片：聊天记录、背景消息、合并转发里的 '
+                '[CQ:image,file=…] 不是工作区文件，要回看请用 read_message_image '
+                '传码里的 file 值，不要拿 CQ 码的哈希、文件名或 URL 来调本工具。'
                 '对截图默认叠加红色坐标网格（每 100px 一条，边缘红色数字就是该线'
                 '相对原图的像素坐标，直接读数字定位控件；小控件先 crop=[x,y,w,h] '
                 '裁一小块再 zoom=2 放大看，放大后网格数字仍是原图坐标，无需换算。'),
@@ -1236,6 +1241,9 @@ _SCHEMAS = [
                 '回看群消息里以 [CQ:image,file=...] 出现的图片：历史消息、'
                 '触发前背景消息、合并转发节点里的图片都能用。把码里的 file 值'
                 '原样作为 ref 传入，图片会作为多模态内容返回给你。'
+                '只用于聊天消息里的图片；工作区里的图片文件（含 mcp/ 截图和 '
+                'save_message_image 存下的路径）要用 read_image 按 path 查看，'
+                '不要用本工具传工作区路径。'
                 '当前这条消息自带的图片你已经能直接看到，不要重复调用；'
                 '同一张图本轮只调一次。'),
             'parameters': {
@@ -1245,6 +1253,32 @@ _SCHEMAS = [
                             'description': '[CQ:image,file=<这里的值>]，不要填 URL 或文件路径'},
                     'question': {'type': 'string',
                                  'description': '可选：你想在这张图里确认什么，会随图一起标注'},
+                },
+                'required': ['ref'],
+            },
+        },
+    },
+    {
+        'type': 'function',
+        'function': {
+            'name': 'save_message_image',
+            'description': (
+                '把消息里以 [CQ:image,file=...] 出现的图片下载并保存到本群'
+                '工作区（历史消息、背景消息、合并转发节点里的都行）。'
+                'ref 照抄码里的 file 值。name 可选：给纯文件名默认放 mcp/；'
+                '给相对路径（如 images/a.png）按该路径存。默认文件名是 '
+                'mcp/msg_image_<时间>_<哈希>.<格式>，重名自动加序号。'
+                '存好后可用 read_image 查看、qq_send_image 发到群里；'
+                'mcp/ 是临时中转目录可能被定期清理，要长期保留请存到其他路径。'
+                '不能写 public/ 公共素材库。'),
+            'parameters': {
+                'type': 'object',
+                'properties': {
+                    'ref': {'type': 'string',
+                            'description': '[CQ:image,file=<这里的值>]，不要填 URL'},
+                    'name': {'type': 'string',
+                             'description': '可选：保存路径或文件名，'
+                                            '如「表情包.png」或「images/a.png」'},
                 },
                 'required': ['ref'],
             },
@@ -1488,6 +1522,78 @@ def _sniff_image(raw: bytes) -> str:
     if raw[:4] == b'RIFF' and raw[8:12] == b'WEBP':
         return 'image/webp'
     return ''
+
+
+_VISION_EXT = {'image/png': 'png', 'image/jpeg': 'jpg',
+               'image/gif': 'gif', 'image/webp': 'webp'}
+
+
+async def _fetch_message_image(ctx: ToolContext, ref: str):
+    """CQ 图片码的 file 值 → (raw, mime)；失败返回中文错误串。
+
+    read_message_image（看图）与 save_message_image（存工作区）共用：
+    NapCat get_image 取地址 → 有界 HTTP 下载 → 魔数校验。
+    """
+    if not ref or '..' in ref or not _SAFE_IMG_REF.fullmatch(ref):
+        return ('错误: ref 必须是消息里 [CQ:image,file=...] 中的 file '
+                '值（图片哈希文件名），不要填 URL 或文件路径')
+    if ctx.bot is None or not hasattr(ctx.bot, 'call_api'):
+        return '错误: 机器人不在线，无法读取消息图片'
+    d = await media_in._api_data(ctx.bot, 'get_image', {'file': ref})
+    url = d.get('url') or ''
+    if not media_in._is_url(url):
+        f2 = d.get('file') or ''
+        url = f2 if media_in._is_url(f2) else ''
+    if not url:
+        return '错误: NapCat 取不到该图片地址（图片可能已过期），可请群友重发'
+    budget = int(ctx.cfg.get('media_download_max_kb', 10240)) * 1024
+    try:
+        raw = await media_in._http_get(url, budget)
+    except Exception as e:
+        return f'错误: 图片下载失败：{e}'
+    mime = media_in.sniff_image(raw)
+    if mime not in media_in._VISION_OK:
+        return f'错误: 不是受支持的图片格式（{mime or "未知"}）'
+    return raw, mime
+
+
+def _image_save_rel(name: str, ref: str, ext: str) -> str:
+    """name 参数 → 工作区相对路径；留空则 mcp/msg_image_<时间>_<哈希>.ext。"""
+    name = (name or '').strip().replace('\\', '/')
+    if not name:
+        stamp = time.strftime('%Y%m%d_%H%M%S')
+        seed = re.sub(r'[^A-Za-z0-9]', '', ref)[:12] or 'img'
+        return f'mcp/msg_image_{stamp}_{seed}.{ext}'
+    if name.startswith('/') or re.match(r'^[a-zA-Z]:', name) or '..' in name:
+        raise SandboxError('name 必须是工作区内的相对路径')
+    if '/' not in name:
+        name = 'mcp/' + name
+    if not re.search(r'\.(png|jpe?g|gif|webp|bmp)$', name, re.IGNORECASE):
+        name = f'{name}.{ext}'
+    return name
+
+
+def _save_image_file(ctx: ToolContext, rel: str, raw: bytes) -> tuple[str, int]:
+    """同步落盘（调用方 to_thread）：重名自动加序号，返回 (实际路径, 字节数)。
+
+    mcp/ 走 MCP 媒体通道（大文件上限、不占群配额、由 TTL 清扫回收）；
+    其他工作区路径走普通配额通道。
+    """
+    _, is_public = ctx.sandbox.resolve(rel, for_write=True)
+    if is_public:
+        raise SandboxError('公共素材库不能直接写，请用 fs_publish（仅主人）')
+    base, dot, ext = rel.rpartition('.')
+    if not dot or '/' in ext:
+        base, ext = rel, ''
+    cur, n = rel, 1
+    while ctx.sandbox.resolve(cur, for_write=True)[0].exists():
+        n += 1
+        cur = f'{base}_{n}.{ext}' if ext else f'{base}_{n}'
+    if cur.startswith('mcp/'):
+        size = ctx.sandbox.write_mcp_media(cur, raw)
+    else:
+        size = ctx.sandbox.write_bytes(cur, raw)
+    return cur, size
 
 
 def _load_image(path: str, question: str, ctx: ToolContext,
@@ -2249,29 +2355,12 @@ async def dispatch(name: str, args: dict, ctx: ToolContext) -> str:
 
         if name == 'read_message_image':
             ref = str(args.get('ref') or args.get('file') or '').strip()
-            if (not ref or '..' in ref
-                    or not _SAFE_IMG_REF.fullmatch(ref)):
-                return ('错误: ref 必须是消息里 [CQ:image,file=...] 中的 file '
-                        '值（图片哈希文件名），不要填 URL 或文件路径')
             if ref in ctx.image_seen:
                 return '这张图本轮已经给过你了，直接看上面的图即可，不要重复取'
-            if ctx.bot is None or not hasattr(ctx.bot, 'call_api'):
-                return '错误: 机器人不在线，无法读取消息图片'
-            d = await media_in._api_data(ctx.bot, 'get_image', {'file': ref})
-            url = d.get('url') or ''
-            if not media_in._is_url(url):
-                f2 = d.get('file') or ''
-                url = f2 if media_in._is_url(f2) else ''
-            if not url:
-                return '错误: NapCat 取不到该图片地址（图片可能已过期），可请群友重发'
-            budget = int(ctx.cfg.get('media_download_max_kb', 10240)) * 1024
-            try:
-                raw = await media_in._http_get(url, budget)
-            except Exception as e:
-                return f'错误: 图片下载失败：{e}'
-            mime = media_in.sniff_image(raw)
-            if mime not in media_in._VISION_OK:
-                return f'错误: 不是受支持的图片格式（{mime or "未知"}）'
+            got = await _fetch_message_image(ctx, ref)
+            if isinstance(got, str):
+                return got
+            raw, mime = got
             ctx.image_seen.add(ref)
             note = f'消息图片 {ref}（{len(raw)} 字节）已取回，下面就是这张图的画面。'
             q = str(args.get('question') or '').strip()
@@ -2280,6 +2369,26 @@ async def dispatch(name: str, args: dict, ctx: ToolContext) -> str:
             return ToolMediaResult(
                 text=note,
                 images=[(mime, base64.b64encode(raw).decode('ascii'))])
+
+        if name == 'save_message_image':
+            ref = str(args.get('ref') or args.get('file') or '').strip()
+            got = await _fetch_message_image(ctx, ref)
+            if isinstance(got, str):
+                return got
+            raw, mime = got
+            ext = _VISION_EXT.get(mime, 'png')
+            try:
+                rel = _image_save_rel(str(args.get('name') or ''), ref, ext)
+                rel, size = await asyncio.to_thread(
+                    _save_image_file, ctx, rel, raw)
+            except Exception as e:
+                return f'错误: 图片保存失败：{e}'
+            hint = ('mcp/ 是临时中转目录，可能被定期清理；要长期保留请另存到'
+                    '工作区其他路径。' if rel.startswith('mcp/') else '')
+            return (f'图片已保存到工作区 {rel}（{size} 字节，{mime}）。'
+                    f'需要查看就调用 read_image（path="{rel}"）；'
+                    f'要发到群里就调用 qq_send_image（source="{rel}"）。'
+                    + hint)
 
         if name == 'read_forward':
             fid = str(args.get('id') or '').strip()

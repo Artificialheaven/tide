@@ -59,14 +59,17 @@ def create_connector():
         from core.official.connection import OfficialConnection
         return OfficialConnection(OfficialConfig.from_conf(configs.conf))
     uri = configs.conf.get("ws_address", "ws://47.93.160.124:3001")
-    headers = {"Authorization": configs.conf.get("token", "test")}
+    headers = {"Authorization": "Bearer " + configs.conf.get("token", "test")}
     return websockets.connect(uri, additional_headers=headers)
 
 
-async def connect_and_run(no_gui=False):
+async def connect_and_run(no_gui=False, shutdown=None):
     """
     连接WebSocket并运行主循环
     使用循环而非递归来避免栈溢出
+
+    shutdown：nogui 模式传入的 ShutdownController（信号桥），GUI 模式为 None。
+    返回值：'give_up'=重连次数耗尽、'signal'=收到退出信号、'fatal'=不可恢复配置错误。
     """
     transport = str(configs.conf.get("transport", "napcat") or "napcat").lower()
     if transport == "official":
@@ -76,8 +79,8 @@ async def connect_and_run(no_gui=False):
     else:
         target = configs.conf.get("ws_address", "ws://47.93.160.124:3001")
 
-    # 从配置中读取重连参数
-    max_attempts = configs.conf.get("max_reconnect_attempts", 0)  # 0表示无限重试
+    # 从配置中读取重连参数（0 表示无限重试；缺省兜底 10 次）
+    max_attempts = configs.conf.get("max_reconnect_attempts", 10)
     base_delay = configs.conf.get("reconnect_base_delay", 2)
     max_delay = configs.conf.get("reconnect_max_delay", 60)
 
@@ -87,13 +90,19 @@ async def connect_and_run(no_gui=False):
         # 检查是否超过最大重连次数
         if max_attempts > 0 and reconnect_count >= max_attempts:
             print(f'[系统] 已达到最大重连次数 ({max_attempts})，停止重连')
-            break
+            return 'give_up'
 
         # 计算重连延迟（指数退避）
         if reconnect_count > 0:
             delay = min(base_delay * (2 ** (reconnect_count - 1)), max_delay)
             print(f'[系统] 将在 {delay:.1f} 秒后尝试第 {reconnect_count + 1} 次重连...')
-            await asyncio.sleep(delay)
+            if shutdown is not None:
+                # 退避期可被信号立即唤醒，不等满 delay
+                if await shutdown.wait_interruptible(delay):
+                    print('[系统] 退避期间收到退出信号，停止重连')
+                    return 'signal'
+            else:
+                await asyncio.sleep(delay)
 
         try:
             print(f'[系统] 正在连接到 {target}...')
@@ -185,7 +194,27 @@ async def connect_and_run(no_gui=False):
                 # 主循环：接收和处理消息
                 while True:
                     try:
-                        _response = await websocket.recv()
+                        if shutdown is not None:
+                            # recv 与信号竞速：official 传输的 recv 阻塞在队列上、
+                            # 连接对象也没有 close()，关连接唤不醒，只能靠竞速统一处理
+                            recv_task = asyncio.create_task(websocket.recv())
+                            sig_task = asyncio.create_task(shutdown.event.wait())
+                            try:
+                                done, _pending = await asyncio.wait(
+                                    {recv_task, sig_task},
+                                    return_when=asyncio.FIRST_COMPLETED)
+                            finally:
+                                if not sig_task.done():
+                                    sig_task.cancel()
+                            if sig_task in done:
+                                recv_task.cancel()
+                                await asyncio.gather(recv_task,
+                                                     return_exceptions=True)
+                                print('[系统] 收到退出信号，关闭当前连接')
+                                break
+                            _response = recv_task.result()
+                        else:
+                            _response = await websocket.recv()
                         if '"meta_event_type":"heartbeat"' not in _response:
                             print(f"Received response: {_response}")
                         response = json.loads(_response)
@@ -222,7 +251,7 @@ async def connect_and_run(no_gui=False):
         
         except websockets.exceptions.InvalidURI:
             print(f'[系统] 无效的连接地址: {target}')
-            break
+            return 'fatal'
 
         except OfficialConfigError as e:
             # 配置缺失/非法重试也不会变好，直接停下并提示怎么修
@@ -230,7 +259,7 @@ async def connect_and_run(no_gui=False):
             print('[系统] 请在 config.json 填写 official_app_id / '
                   'official_app_secret（GUI「框架配置」窗口或 Web 面板也可改），'
                   '或设置环境变量 QQBOT_APP_ID / QQBOT_APP_SECRET；改完重启程序')
-            break
+            return 'fatal'
         
         except ConnectionRefusedError:
             print('[系统] 连接被拒绝，请检查服务器是否运行')
@@ -258,21 +287,48 @@ async def connect_and_run(no_gui=False):
         # 清空当前的bot实例和websocket
         globals.bot_instance = None
         globals.websocket = None
-        
+
+        # 信号触发的断线：收尾已完成，不再重连
+        if shutdown is not None and shutdown.signalled:
+            return 'signal'
+
         # 增加重连计数
         reconnect_count += 1
 
 
-async def start(no_gui=False):
-    """启动函数"""
+async def start(no_gui=False, shutdown=None):
+    """启动函数。shutdown 为 nogui 信号桥，GUI 模式传 None。"""
     print('[系统] 框架正在启动中...')
-    
+
+    if shutdown is not None:
+        await shutdown.attach()
     try:
-        await connect_and_run(no_gui=no_gui)
+        reason = await connect_and_run(no_gui=no_gui, shutdown=shutdown)
+        if reason == 'give_up' and shutdown is not None:
+            # 进程留存不退出：事件循环停车，Web 面板等线程继续服务，等信号收尾
+            print('[系统] 已放弃重连，进程保持存活，等待退出信号（Ctrl+C 退出）')
+            await shutdown.park()
     except Exception as e:
         print(f'[系统] 启动失败: {type(e).__name__}: {e}')
         import traceback
         traceback.print_exc()
+    finally:
+        # 有界回收 on_stop 残余任务，保证循环关闭前没有悬挂 task/生成器
+        try:
+            _manager = get_plugin_manager()
+            if _manager is not None:
+                await _manager.adrain_background(timeout=5.0)
+        except Exception:
+            import traceback
+            traceback.print_exc()
+        try:
+            from utils.asyncutil import drain_pending
+            await drain_pending(timeout=3.0)
+        except Exception:
+            import traceback
+            traceback.print_exc()
+        if shutdown is not None:
+            await shutdown.detach()
 
 
 if __name__ == "__main__":
@@ -283,12 +339,19 @@ if __name__ == "__main__":
     
     if no_gui:
         print("[系统] 无GUI模式启动")
-        # 无GUI模式，直接运行
-        asyncio.run(start(no_gui=True))
+        # 信号处理只能在主线程装：signal.signal → threading.Event → 桥接 task
+        from core.signals import ShutdownController
+        shutdown = ShutdownController()
+        shutdown.install()
+        try:
+            asyncio.run(start(no_gui=True, shutdown=shutdown))
+        finally:
+            shutdown.restore()
     else:
-        # GUI模式
+        # GUI模式（asyncio 在子线程，不装信号桥，shutdown=None 时新分支全部 no-op）
         from ui import main_ui
         keep_loop = True
         ui = main_ui.UI()
-        threading.Thread(target=lambda: asyncio.run(start(no_gui=False))).start()
+        threading.Thread(target=lambda: asyncio.run(
+            start(no_gui=False, shutdown=None))).start()
         ui.setup()

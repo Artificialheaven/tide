@@ -1095,12 +1095,24 @@ class Engine:
                                    tool_calls=wire)
 
             if interim:
-                at_map = await self._at_map(gid, cfg, interim)
-                n = await reply.send_in_chunks(
-                    self.p.bot, gid, interim, cfg,
-                    message_type=parsed.chat_type, name_map=at_map,
-                    quote_id=reply.take_quote(tool_ctx.quote_state),
-                    pctx=tool_ctx.pctx)
+                try:
+                    at_map = await self._at_map(gid, cfg, interim)
+                    n = await reply.send_in_chunks(
+                        self.p.bot, gid, interim, cfg,
+                        message_type=parsed.chat_type, name_map=at_map,
+                        quote_id=reply.take_quote(tool_ctx.quote_state),
+                        pctx=tool_ctx.pctx)
+                except asyncio.CancelledError:
+                    # assistant(tool_calls) 行已落库：补齐占位结果再退出，
+                    # 否则历史里留下残缺链，之后每次请求都会 400
+                    self._fill_missing_tool_results(
+                        gid, messages, wire, set(), '本轮被中止')
+                    raise
+                except Exception as e:
+                    # 插话发送失败（网络抖动/限流等）不应打断工具执行
+                    self.log(f'群 {gid} 工具轮{rounds} 插话发送失败'
+                             f'（继续执行工具）: {e}', 'warn')
+                    n = 0
                 sent_texts.add(interim)
                 self.log(f'群 {gid} 工具轮{rounds} 模型插话 {n} 条：'
                          f'{self._clip(interim, 120)}', 'ok')
@@ -1110,37 +1122,58 @@ class Engine:
                 self._live('assistant_send', gid, parsed.chat_type, turn_id,
                            text=interim, phase='interim', n_chunks=n)
 
-            for norm, w in zip(result.tool_calls, wire):
-                tool_name = norm['name']
+            answered: set[str] = set()
+            for norm in result.tool_calls:
+                call_id = str(norm.get('id') or '')
+                tool_name = norm.get('name') or ''
                 tool_args = self._clip(
                     json.dumps(norm.get('arguments') or {},
                                ensure_ascii=False), 300)
-                content = await self._dispatch(
-                    tool_name, norm.get('arguments') or {}, tool_ctx,
-                    cfg, enabled_mcp, enabled_custom)
-                # read_image 返回多模态结果：当轮 tool 消息带图片回传视觉，
-                # 落库/日志只存文字说明，历史窗不携带 base64
-                if isinstance(content, builtin_tools.ToolMediaResult):
-                    note, tool_content = content.text, content.to_parts()
-                else:
-                    note, tool_content = str(content), str(content)
-                self.log(f'群 {gid} 工具 {tool_name} 返回：{self._clip(note)}',
-                         'warn' if str(note).startswith('错误') else 'info')
-                if trace is not None:
-                    trace.append({'k': 'tool', 'round': rounds,
-                                  'name': tool_name, 'args': tool_args,
-                                  'ok': not str(note).startswith('错误'),
-                                  'result': self._clip(str(note), 600)})
-                self._live('tool_result', gid, parsed.chat_type, turn_id,
-                           round=rounds, call_id=norm['id'], name=tool_name,
-                           arguments=norm.get('arguments') or {},
-                           ok=not str(note).startswith('错误'),
-                           result=str(note))
-                messages.append({'role': 'tool', 'tool_call_id': norm['id'],
+                try:
+                    content = await self._dispatch(
+                        tool_name, norm.get('arguments') or {}, tool_ctx,
+                        cfg, enabled_mcp, enabled_custom)
+                    # read_image 返回多模态结果：当轮 tool 消息带图片回传视觉，
+                    # 落库/日志只存文字说明，历史窗不携带 base64
+                    if isinstance(content, builtin_tools.ToolMediaResult):
+                        note, tool_content = content.text, content.to_parts()
+                    else:
+                        note, tool_content = str(content), str(content)
+                    self.log(f'群 {gid} 工具 {tool_name} 返回：'
+                             f'{self._clip(note)}',
+                             'warn' if str(note).startswith('错误') else 'info')
+                    if trace is not None:
+                        trace.append({'k': 'tool', 'round': rounds,
+                                      'name': tool_name, 'args': tool_args,
+                                      'ok': not str(note).startswith('错误'),
+                                      'result': self._clip(str(note), 600)})
+                    self._live('tool_result', gid, parsed.chat_type, turn_id,
+                               round=rounds, call_id=call_id,
+                               name=tool_name,
+                               arguments=norm.get('arguments') or {},
+                               ok=not str(note).startswith('错误'),
+                               result=str(note))
+                except asyncio.CancelledError:
+                    self._fill_missing_tool_results(
+                        gid, messages, wire, answered, '本轮被中止')
+                    raise
+                except Exception as e:
+                    # 兜底：一个工具出错只影响它自己，其余调用和后续轮次照常
+                    self.log(f'群 {gid} 工具 {tool_name} 处理异常: {e}',
+                             'error')
+                    note = tool_content = \
+                        f'错误: 工具 {tool_name} 执行异常: {e}'
+                messages.append({'role': 'tool', 'tool_call_id': call_id,
                                  'content': tool_content})
-                storage.insert_message(
-                    self.p.db_path, gid, 'tool', note,
-                    tool_call_id=norm['id'], name=tool_name)
+                answered.add(call_id)
+                try:
+                    storage.insert_message(
+                        self.p.db_path, gid, 'tool', note,
+                        tool_call_id=call_id, name=tool_name)
+                except Exception as e:
+                    # 落库失败不影响本轮（内存序列完整）；历史残缺由
+                    # context._repair_tool_chains 在下一轮请求前修复
+                    self.log(f'群 {gid} 工具结果落库失败: {e}', 'warn')
 
             if loop_ctx is not None:
                 # 长跑轮：无上限；但每 N 个工具轮必须说一次进展，说完继续干
@@ -1167,7 +1200,20 @@ class Engine:
                     '请用一两句简短群聊口语告诉大家当前进展或结果；'
                     '如果事情还没做完，让对方再说一句「继续」你就接着做。'
                     '只输出要说的话。'})
-                final_close = await self.p.llm.chat(messages, cfg)
+                try:
+                    final_close = await self.p.llm.chat(messages, cfg)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    # 工具链已完整落库，收尾请求失败就退回一句静态收尾；
+                    # 不让一次 API 故障升级成整轮异常（handle 会静默吞掉，
+                    # 对外表现为这轮彻底没回音）
+                    self.log(f'群 {gid} 工具轮次达上限后收尾请求失败: {e}',
+                             'error')
+                    storage.add_usage(self.p.db_path, {
+                        'group_id': gid, 'kind': 'chat',
+                        'tool_rounds': rounds, 'ok': False})
+                    return '（这轮操作步数到上限了，要我继续就说一声）'
                 storage.add_usage(self.p.db_path, {
                     'group_id': gid, 'kind': 'chat', 'tool_rounds': rounds,
                     'ok': True, **final_close.usage})
@@ -1205,7 +1251,15 @@ class Engine:
             '别提「工具/轮次/系统/模式」）。只输出要说的话。')
         messages.append({'role': 'system', 'content': directive})
         try:
-            close = await self.p.llm.chat(messages, cfg)
+            try:
+                close = await self.p.llm.chat(messages, cfg)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                # 催场失败只是这一次少说一句，绝不能掀翻整个长跑 worker
+                self.log(f'群 {gid} 长跑强制汇报请求失败（跳过本次，'
+                         f'继续任务）: {e}', 'error')
+                return
             storage.add_usage(self.p.db_path, {
                 'group_id': gid, 'kind': 'chat',
                 'tool_rounds': loop_ctx.get('total_rounds', 0),
@@ -1714,8 +1768,48 @@ class Engine:
                 f'只有主人（QQ {owner}）才能指令。请拒绝对方并说明：'
                 f'需要主人本人确认后我才能执行，不要尝试绕过。')
 
+    def _fill_missing_tool_results(self, gid, messages, wire, answered,
+                                   reason: str) -> None:
+        """给 assistant.tool_calls 里没拿到结果的调用补占位 tool 行。
+
+        OpenAI 兼容接口要求每个 tool_call_id 都有对应 tool 消息；对话轮在
+        批量派发中途异常/取消时若不补齐，落库历史会永远缺结果，下一轮起
+        每次请求都 400（对外唯一症状是「对话突然一直不回」）。
+        """
+        for tc in wire:
+            cid = str(tc.get('id') or '')
+            if not cid or cid in answered:
+                continue
+            name = (tc.get('function') or {}).get('name', '')
+            text = f'错误: 工具调用未完成（{reason}）'
+            messages.append({'role': 'tool', 'tool_call_id': cid,
+                             'content': text})
+            try:
+                storage.insert_message(self.p.db_path, gid, 'tool', text,
+                                       tool_call_id=cid, name=name)
+            except Exception as e:
+                self.log(f'群 {gid} 补写工具结果失败: {e}', 'warn')
+            answered.add(cid)
+
     async def _dispatch(self, name: str, args: dict, tool_ctx, cfg,
                         enabled_mcp, enabled_custom=None) -> str:
+        """工具派发总入口：任何异常都转成错误文本，绝不打断工具循环。
+
+        CancelledError（插件重载/关停时的任务取消）继续上抛，由 _chat_loop
+        补齐未执行的 tool 结果后再退出，避免历史里留下残缺调用链。
+        """
+        try:
+            return await self._dispatch_impl(
+                name, args, tool_ctx, cfg, enabled_mcp, enabled_custom)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            self.log(f'群 {tool_ctx.group_id} 工具 {name} 派发异常: {e}',
+                     'error')
+            return f'错误: 工具 {name} 执行异常: {e}'
+
+    async def _dispatch_impl(self, name: str, args: dict, tool_ctx, cfg,
+                             enabled_mcp, enabled_custom=None) -> str:
         denied = self._risk_denied(name, tool_ctx, cfg)
         if denied:
             self.log(f'群 {tool_ctx.group_id} 非主人 {tool_ctx.sender_id} '

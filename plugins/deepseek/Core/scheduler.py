@@ -11,6 +11,8 @@ import asyncio
 import datetime as _dt
 import time
 
+from utils.asyncutil import cancel_task
+
 from . import reply, storage
 from .config import resolve_group, resolve_persona
 from .tasks import parse_due
@@ -202,12 +204,7 @@ class JobManager:
     async def stop(self):
         task = self._task
         self._task = None
-        if task is not None:
-            task.cancel()
-            try:
-                await asyncio.wait_for(asyncio.shield(task), timeout=3)
-            except Exception:
-                pass
+        await cancel_task(task, timeout=3.0)
 
     async def _loop(self, plugin):
         while True:

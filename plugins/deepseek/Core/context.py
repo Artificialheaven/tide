@@ -42,11 +42,22 @@ def _content_len(row: dict) -> int:
 
 
 def _assistant_tool_ids(row: dict) -> set:
+    """assistant 行声明的 tool_call_id 集合。
+
+    DB 行里 tool_calls 是 JSON 字符串，render_openai 渲染后的消息里已是
+    list；两种都认，修复函数才能同时作用于窗口和已渲染消息。
+    """
     if row.get('role') != 'assistant' or not row.get('tool_calls'):
         return set()
+    raw = row['tool_calls']
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return set()
     try:
-        return {tc.get('id') for tc in json.loads(row['tool_calls']) if tc.get('id')}
-    except (json.JSONDecodeError, TypeError):
+        return {tc.get('id') for tc in raw if tc.get('id')}
+    except (TypeError, AttributeError):
         return set()
 
 
@@ -66,7 +77,8 @@ def select_window(rows: list, rounds: int, char_budget: int) -> list:
 
 
 def _trim_orphans(win: list) -> list:
-    """切掉窗口开头不合法的 tool 行 / 工具结果不全的 assistant 行。"""
+    """切掉窗口开头不合法的 tool 行 / 工具结果不全的 assistant 行，
+    再整窗修复工具调用链（见 _repair_tool_chains）。"""
     while win:
         first = win[0]
         if first.get('role') == 'tool':
@@ -87,7 +99,50 @@ def _trim_orphans(win: list) -> list:
                     win = win[1:]
                 continue
         break
-    return win
+    return _repair_tool_chains(win)
+
+
+def _drop_last_batch(out: list) -> None:
+    """丢掉 out 末尾的残缺调用批（assistant 行 + 其后已收到的 tool 行）。"""
+    while out and out[-1].get('role') == 'tool':
+        out.pop()
+    if out and out[-1].get('role') == 'assistant':
+        out.pop()
+
+
+def _repair_tool_chains(rows: list) -> list:
+    """整窗修复 assistant.tool_calls 链：每个调用批必须紧跟、且只跟它自己
+    要求的 tool 结果，否则 OpenAI 兼容接口直接 400，之后每一轮请求都失败
+    （对外表现就是「对话突然永远不回」）。
+
+    正常落库不会产生残缺链；来源是对话轮在「assistant 行已落库、tool 结果
+    未全部落库」之间被取消/异常打断（插件重载、模型请求超时、进程退出等）。
+    旧逻辑只看窗口开头，窗口从半截链之后开始时中段残缺会漏网，这里统一
+    清掉残缺调用批与无主 tool 行（宁可少一段历史，也不让请求序列非法）。
+    """
+    out: list = []
+    pending: set = set()   # 当前 assistant 批还缺哪些 tool_call_id
+    for r in rows:
+        role = r.get('role')
+        if role == 'assistant':
+            if pending:
+                _drop_last_batch(out)
+            pending = _assistant_tool_ids(r)
+            out.append(r)
+        elif role == 'tool':
+            cid = r.get('tool_call_id')
+            if pending and cid in pending:
+                pending.discard(cid)
+                out.append(r)
+            # 无主 / 重复 / 批外的 tool 行一律丢弃
+        else:
+            if pending:
+                _drop_last_batch(out)
+                pending = set()
+            out.append(r)
+    if pending:
+        _drop_last_batch(out)
+    return out
 
 
 # 后台触发在 messages.name 上的来源标（免迁移复用现有列）。
@@ -196,7 +251,9 @@ def render_openai(rows: list, raw_bg_notice: bool = False) -> list:
             out.append({'role': 'tool',
                         'tool_call_id': r.get('tool_call_id') or '',
                         'content': r.get('content', '')[:2000]})
-    return out
+    # 所有请求都从这里出网：即使调用方用 window=rows（不裁剪）也必须保证
+    # tool_calls 链完整，否则一条历史脏数据会让之后每次请求都 400
+    return _repair_tool_chains(out)
 
 
 # 正文里可操作的富消息码进判官/摘要语料前先退化成人话（省 token、防链接误导）

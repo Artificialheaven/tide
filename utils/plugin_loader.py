@@ -14,9 +14,23 @@ import re
 import shutil
 import traceback
 
+from utils.asyncutil import wait_task_resilient
+
 
 # 热重载串行锁：防止两个重载并发清理/重建 sys.modules
 _reload_lock = threading.RLock()
+
+# 实例级关停标记：ashutdown/_call_stop 调过 on_stop 后打上，atexit 不再重复调。
+# 必须挂实例而不是插件名——热重载后的同名新实例不能被旧标记污染
+_STOP_MARK = '_tide_on_stop_done'
+
+
+def _mark_stopped(inst) -> None:
+    try:
+        setattr(inst, _STOP_MARK, True)
+    except Exception:
+        # 极端情况（__slots__ 等）：标记打不上就静默退回每次都尝试
+        pass
 
 
 def get_plugins_path():
@@ -473,7 +487,8 @@ def _call_stop(inst, timeout: float = 10.0):
                 print('[卸载] 事件循环不可用，跳过异步 on_stop')
         else:
             method()
-    except Exception:
+    except BaseException:
+        # 含 CancelledError（BaseException）：循环关闭期 future 可能被取消
         print('[卸载] on_stop 执行异常:')
         traceback.print_exc()
 
@@ -520,6 +535,8 @@ class PluginManager:
         self.plugins = {}
         self.plugin_info = {}
         self.event_handlers = {}
+        # 在跑的 on_stop 兄弟 task（外层被取消时它们仍在自己的 task 上下文里跑完）
+        self._bg_stops: set = set()
     
     def load_all_plugins(self):
         """加载 plugins 目录下的所有插件（基于文件夹）"""
@@ -947,30 +964,62 @@ class PluginManager:
         return success_list, failed_list
     
     async def ashutdown_all_plugins(self, timeout: float = 10.0):
-        """事件循环线程内（连接断开时）关闭全部插件——直接 await 异步 on_stop。"""
+        """事件循环线程内（连接断开时）关闭全部插件。
+
+        每个异步 on_stop 跑在独立兄弟 task 里，本函数只 shield 等待、从不 cancel 它：
+        外层任务被 CancelledError 打断时，on_stop 协程本身收不到取消，八段清理与
+        MCP 生成器 aclose 全部在自己的 task 上下文里跑完（避免 anyio 跨 task 退出
+        cancel scope 报错）。一个插件失败不连累其余插件。
+        """
         for key, inst in list(self.plugins.items()):
+            if getattr(inst, _STOP_MARK, False):
+                continue
             method = getattr(inst, 'on_stop', None)
             if method is None:
+                _mark_stopped(inst)
                 continue
             try:
                 if inspect.iscoroutinefunction(method):
-                    await asyncio.wait_for(method(), timeout=timeout)
+                    task = asyncio.create_task(method())
+                    self._bg_stops.add(task)
+                    task.add_done_callback(self._bg_stops.discard)
+                    await wait_task_resilient(task, timeout)
                 else:
                     method()
-            except Exception:
+            except BaseException:
+                # helper 理论上不抛，兜底保证后续插件不被连坐
                 print(f'[关闭] 插件 {key} on_stop 异常:')
                 traceback.print_exc()
+            finally:
+                _mark_stopped(inst)
+
+    async def adrain_background(self, timeout: float = 5.0):
+        """有界回收超时残留的 on_stop 兄弟 task（start() 收尾时调）。"""
+        pending = [t for t in list(self._bg_stops) if not t.done()]
+        if not pending:
+            return
+        # gather 返回 Future，ensure_future 原样接受（create_task 只收协程）
+        gathered = asyncio.ensure_future(
+            asyncio.gather(*pending, return_exceptions=True))
+        await wait_task_resilient(gathered, timeout)
 
     def shutdown_all_plugins(self, timeout: float = 10.0):
         """事件循环线程外（atexit 等）关闭全部插件。"""
         for key, inst in list(self.plugins.items()):
+            # ashutdown 已停过的实例静默跳过，消除 atexit 的重复 on_stop 噪音
+            if getattr(inst, _STOP_MARK, False):
+                continue
             _call_stop(inst, timeout=timeout)
+            _mark_stopped(inst)
 
     def unload_plugin(self, plugin_name: str):
         """卸载指定插件"""
         if plugin_name in self.plugins:
             # 先触发 on_stop
-            _call_stop(self.plugins[plugin_name])
+            inst = self.plugins[plugin_name]
+            _call_stop(inst)
+            # 标记打在旧实例上；同名新实例不受污染，atexit 仍会停新实例
+            _mark_stopped(inst)
             del self.plugins[plugin_name]
             print(f"[卸载] 插件实例已移除: {plugin_name}")
 

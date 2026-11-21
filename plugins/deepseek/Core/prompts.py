@@ -49,7 +49,9 @@ _MEDIA_DEFAULT = (
     '其他工作区视频/GIF 也用 read_video 看。'
     '历史消息、触发前背景消息、合并转发节点里的旧图片不会自动附上，'
     '它们显示成 [CQ:image,file=哈希]，想看就把 file 值传给 '
-    'read_message_image；旧文件的 file_id/busid 仍可喂 qq_download_file；'
+    'read_message_image；想把旧图存进工作区当素材或再发出去，'
+    '就把同一个 file 值传给 save_message_image；'
+    '旧文件的 file_id/busid 仍可喂 qq_download_file；'
     '旧视频的 path 可能已被临时文件清理，read_video 报文件不存在就是过期了；'
     '合并转发显示成 [CQ:forward,id=…]，'
     '用 read_forward 展开（里面的卡片分享会给出标题和原链接）。')
@@ -386,6 +388,7 @@ def build_catalog(tool_names, custom_items=(), has_mcp: bool = False) -> str:
 
     line = _join_present(names, [
         ('read_message_image', 'read_message_image 看 [CQ:image] 旧图片'),
+        ('save_message_image', 'save_message_image 把 [CQ:image] 旧图存进工作区'),
         ('read_forward', 'read_forward 展开 [CQ:forward] 合并转发'),
         ('history_query', 'history_query 查更早的历史消息'),
     ], '· 看懂聊天记录里的码与旧事：')

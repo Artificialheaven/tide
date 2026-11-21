@@ -14,6 +14,8 @@ import json
 import random
 import time
 
+from utils.asyncutil import cancel_task
+
 from . import storage
 
 WEEK_CN = ('一', '二', '三', '四', '五', '六', '日')
@@ -204,12 +206,7 @@ class ProactorManager:
     async def stop(self):
         task = self._task
         self._task = None
-        if task is not None:
-            task.cancel()
-            try:
-                await asyncio.wait_for(asyncio.shield(task), timeout=3)
-            except Exception:
-                pass
+        await cancel_task(task, timeout=3.0)
 
     async def _loop(self, plugin):
         while True:

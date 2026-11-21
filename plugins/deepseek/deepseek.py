@@ -88,6 +88,8 @@ class main(Plugin):
         self.prompts = PromptStore(self.db_path, log=self.log)
         # 判官/摘要/抽取提示词走提示词页注册表，缺省=内置默认
         self.llm.prompts = self.prompts
+        # 瞬时失败重试日志走插件日志（跨线程 print 也一致）
+        self.llm.log = self.log
         self.memory = MemoryManager(self.db_path, log=self.log)
         self.self_memory = SelfMemoryManager(
             self.db_path, log=self.log, prompts=self.prompts)
@@ -168,40 +170,30 @@ class main(Plugin):
                 pass
         self.log(f'on_start 完成，bot={self.bot_name}({self.bot_id})')
 
+    async def _seg(self, name: str, coro):
+        """on_stop 单段隔离：CancelledError 是 BaseException，必须显式兜住，
+        否则一段被取消会腰斩后续全部清理（MCP/LLM 连接泄漏、anyio 跨 task 报错）。"""
+        try:
+            await coro
+        except BaseException as e:
+            self.log(f'on_stop {name} 中断: {type(e).__name__}: {e}', 'warn')
+
+    def _seg_sync(self, name: str, fn):
+        try:
+            fn()
+        except BaseException as e:
+            self.log(f'on_stop {name} 中断: {type(e).__name__}: {e}', 'warn')
+
     async def on_stop(self):
-        try:
-            await self.loop.stop_all()
-        except Exception:
-            pass
-        try:
-            await self.tasks.stop()
-        except Exception:
-            pass
-        try:
-            await self.scheduler.stop()
-        except Exception:
-            pass
-        try:
-            await self.proactor.stop()
-        except Exception:
-            pass
-        try:
-            # 只停 HTTP 服务；监测子进程是分离的，刻意不杀（监测不能中断）
-            self.triggers.stop()
-        except Exception:
-            pass
-        try:
-            self.live.stop()
-        except Exception:
-            pass
-        try:
-            await self.mcp.shutdown(total_budget=8.0)
-        except Exception:
-            pass
-        try:
-            await self.llm.aclose()
-        except Exception:
-            pass
+        await self._seg('loop.stop_all', self.loop.stop_all())
+        await self._seg('tasks.stop', self.tasks.stop())
+        await self._seg('scheduler.stop', self.scheduler.stop())
+        await self._seg('proactor.stop', self.proactor.stop())
+        # 只停 HTTP 服务；监测子进程是分离的，刻意不杀（监测不能中断）
+        self._seg_sync('triggers.stop', self.triggers.stop)
+        self._seg_sync('live.stop', self.live.stop)
+        await self._seg('mcp.shutdown', self.mcp.shutdown(total_budget=8.0))
+        await self._seg('llm.aclose', self.llm.aclose())
         self.log('on_stop 完成')
 
     # ── 工具方法（供 Engine/Web 使用）──────────────────────────
@@ -706,6 +698,7 @@ class main(Plugin):
                  'qzone.delete': '删QQ空间说说（主人）',
                  'qzone.recent': '查本机器人空间留痕',
                  'message.read_image': '回看消息里的图片',
+                 'message.save_image': '保存消息图片到工作区',
                  'message.read_forward': '展开合并转发',
                  'meme.lookup': '梗指南查梗'}
         for key in _ALL_TOOL_KEYS:

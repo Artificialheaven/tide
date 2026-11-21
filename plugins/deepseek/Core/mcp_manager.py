@@ -18,6 +18,8 @@ import re
 import time
 from datetime import timedelta
 
+from utils.asyncutil import wait_resilient
+
 from . import imgmark, storage
 from .mcp_winboot import enable_pywin32
 
@@ -142,10 +144,14 @@ class McpManager:
         return h
 
     async def _close(self, h: McpHandle):
-        if h.stack is not None:
-            with contextlib.suppress(Exception):
-                await h.stack.aclose()
-        h.stack, h.session, h.status = None, None, 'stopped'
+        try:
+            if h.stack is not None:
+                # 含 CancelledError（BaseException）：anyio 生成器关闭被打断时
+                # 也要保证 handle 状态落 stopped，不留半连接
+                with contextlib.suppress(BaseException):
+                    await h.stack.aclose()
+        finally:
+            h.stack, h.session, h.status = None, None, 'stopped'
 
     async def restart(self, server_id: str):
         h = self._handles.get(server_id)
@@ -358,10 +364,15 @@ class McpManager:
         async def _one(h: McpHandle):
             try:
                 await asyncio.wait_for(self._close(h), timeout=5.0)
-            except Exception:
+            except BaseException:
                 pass
 
-        await asyncio.wait_for(
-            asyncio.gather(*(_one(h) for h in handles), return_exceptions=True),
-            timeout=total_budget)
-        self._handles.clear()
+        try:
+            # 外层取消也不冒泡；超时残余由框架 drain_pending 兜底回收
+            await wait_resilient(
+                asyncio.gather(*(_one(h) for h in handles),
+                               return_exceptions=True),
+                total_budget)
+        finally:
+            # 无论是否被取消/超时，登记都清空，避免热重载后复用半关闭 handle
+            self._handles.clear()
