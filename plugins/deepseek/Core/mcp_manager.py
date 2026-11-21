@@ -18,7 +18,7 @@ import re
 import time
 from datetime import timedelta
 
-from utils.asyncutil import wait_resilient
+from .asyncutil import wait_resilient
 
 from . import imgmark, storage
 from .mcp_winboot import enable_pywin32

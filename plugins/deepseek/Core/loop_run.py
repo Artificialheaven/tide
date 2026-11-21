@@ -15,8 +15,7 @@ import asyncio
 import datetime as _dt
 import traceback
 
-from utils.asyncutil import wait_resilient
-
+from .asyncutil import wait_resilient
 from . import storage
 from .config import resolve_group
 from .models import ParsedMessage

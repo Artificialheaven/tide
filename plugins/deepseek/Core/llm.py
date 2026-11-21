@@ -12,8 +12,7 @@ import random
 import re
 import uuid
 
-from utils.asyncutil import wait_resilient
-
+from .asyncutil import wait_resilient
 from . import config as cfg_mod, context as ctx_mod, prompts as prompts_mod
 from .config import ROUTE_LABELS
 from .dsml import parse_dsml

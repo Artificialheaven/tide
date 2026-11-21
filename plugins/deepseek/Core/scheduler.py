@@ -11,8 +11,7 @@ import asyncio
 import datetime as _dt
 import time
 
-from utils.asyncutil import cancel_task
-
+from .asyncutil import cancel_task
 from . import reply, storage
 from .config import resolve_group, resolve_persona
 from .tasks import parse_due
