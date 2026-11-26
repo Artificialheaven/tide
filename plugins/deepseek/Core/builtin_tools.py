@@ -84,10 +84,17 @@ TOOL_KEYS = {
     'qzone_publish': 'qzone.publish',
     'qzone_delete': 'qzone.delete',
     'qzone_recent': 'qzone.recent',
+    'qzone_list': 'qzone.list',
+    'qzone_detail': 'qzone.detail',
+    'qzone_images': 'qzone.images',
+    'qzone_feeds': 'qzone.feeds',
+    'qzone_comment': 'qzone.comment',
+    'qzone_like': 'qzone.like',
     'read_message_image': 'message.read_image',
     'save_message_image': 'message.save_image',
     'read_forward': 'message.read_forward',
     'meme_lookup': 'meme.lookup',
+    'subagent_task': 'agent.subagent',
 }
 
 _SCHEMAS = [
@@ -1185,22 +1192,25 @@ _SCHEMAS = [
         'function': {
             'name': 'qzone_publish',
             'description': (
-                '在机器人账号的 QQ 空间发布一条纯文字说说（风险操作，仅主人可指令）。'
-                '通过 NapCat 自带接口发表，发表成功会返回 tid 并在本地留痕，'
-                '之后可用 qzone_delete 删除、qzone_recent 查最近发布。'
-                '默认所有人可见；ugc_right 可见范围：1 所有人（默认）、4 好友、'
-                '16 部分好友可见（必须给 target_uins）、64 仅自己、'
-                '128 部分好友不可见（必须给 target_uins）。'),
+                '在机器人账号的 QQ 空间发布一条说说（风险操作，仅主人可指令）。'
+                '支持纯文字、纯图片或图文混排（NapCat 4.18.41+ 的 send_qzone_msg）。'
+                '发表成功会返回 tid 并在本地留痕，之后可用 qzone_delete 删除、'
+                'qzone_recent 查最近发布。默认所有人可见；ugc_right 可见范围：'
+                '1 所有人（默认）、4 好友、16 部分好友可见（必须给 target_uins）、'
+                '64 仅自己、128 部分好友不可见（必须给 target_uins）。'
+                'images 里的地址用工作区/public 下的文件（file:// 绝对路径或 '
+                'http(s) 链接）或 base64:// 数据。'),
             'parameters': {
                 'type': 'object',
                 'properties': {
-                    'content': {'type': 'string', 'description': '说说正文（纯文字，最多 5000 字）'},
+                    'content': {'type': 'string', 'description': '说说正文，最多 5000 字；纯图片说说可不填'},
+                    'images': {'type': 'array', 'items': {'type': 'string'},
+                               'description': '图片地址数组，最多 9 张；支持 file:// 绝对路径、http(s) 链接、base64:// 数据'},
                     'ugc_right': {'type': 'integer', 'enum': [1, 4, 16, 64, 128],
                                   'description': '可见范围，默认 1 所有人可见'},
                     'target_uins': {'type': 'array', 'items': {'type': 'string'},
                                     'description': '部分好友 QQ 号数组，仅 ugc_right=16/128 时需要'},
                 },
-                'required': ['content'],
             },
         },
     },
@@ -1230,6 +1240,115 @@ _SCHEMAS = [
                 'properties': {
                     'limit': {'type': 'integer', 'description': '条数，默认 10，最多 30'},
                 },
+            },
+        },
+    },
+    {
+        'type': 'function',
+        'function': {
+            'name': 'qzone_list',
+            'description': (
+                '读 QQ 空间说说列表（默认读机器人自己空间的最近说说，最多 100 条）。'
+                '返回每条说说的 tid、发布时间、评论数、图片数、可见性和正文预览。'
+                '拿到 tid 后可再用 qzone_detail 看完整评论树、qzone_images 看配图、'
+                'qzone_comment 去评论。'),
+            'parameters': {
+                'type': 'object',
+                'properties': {
+                    'limit': {'type': 'integer', 'description': '条数，默认 10，最多 100'},
+                    'target_uin': {'type': 'string',
+                                   'description': '要读哪个 QQ 的空间，默认/留空=机器人自己'},
+                },
+            },
+        },
+    },
+    {
+        'type': 'function',
+        'function': {
+            'name': 'qzone_detail',
+            'description': (
+                '读某条 QQ 空间说说的详情：正文 + 完整评论树（一级评论与楼中楼回复，'
+                '带 comment_id / uin，回复某条评论时要用）。tid 来自 qzone_list、'
+                'qzone_feeds、qzone_publish 的返回或空间知会通知。'),
+            'parameters': {
+                'type': 'object',
+                'properties': {
+                    'tid': {'type': 'string', 'description': '说说 tid'},
+                },
+                'required': ['tid'],
+            },
+        },
+    },
+    {
+        'type': 'function',
+        'function': {
+            'name': 'qzone_images',
+            'description': (
+                '看某条 QQ 空间说说的配图（多模态）。图片会作为画面直接返回给你；'
+                '一条说说最多 9 张，一次最多取 4 张。indexes 不传时取前 4 张。'),
+            'parameters': {
+                'type': 'object',
+                'properties': {
+                    'tid': {'type': 'string', 'description': '说说 tid'},
+                    'indexes': {'type': 'array', 'items': {'type': 'integer'},
+                                'description': '要看第几张（0 开始），不传=前几张'},
+                },
+                'required': ['tid'],
+            },
+        },
+    },
+    {
+        'type': 'function',
+        'function': {
+            'name': 'qzone_feeds',
+            'description': (
+                '读 QQ 空间好友动态（好友发的说说），返回发布者 uin/昵称、tid、'
+                '正文预览、赞/评论数、图片数，用来了解朋友们在空间发了什么，'
+                '或找出 @ 了你的说说（通知里给的 tid 优先用通知里的）。'),
+            'parameters': {
+                'type': 'object',
+                'properties': {
+                    'limit': {'type': 'integer', 'description': '条数，默认 10，最多 30'},
+                },
+            },
+        },
+    },
+    {
+        'type': 'function',
+        'function': {
+            'name': 'qzone_comment',
+            'description': (
+                '在 QQ 空间说说下发表评论或回复某条评论（风险操作，仅主人可指令；'
+                '外发不可撤回，发前想清楚）。只传 tid + content 是发一条新评论；'
+                '要回复别人某条评论，必须同时提供 comment_id 与 comment_uin'
+                '（成对，来自 qzone_detail），指定接收者再加 reply_uin/reply_name；'
+                '楼中楼回复只支持纯文字，不能带图。'),
+            'parameters': {
+                'type': 'object',
+                'properties': {
+                    'tid': {'type': 'string', 'description': '说说 tid'},
+                    'content': {'type': 'string', 'description': '评论正文'},
+                    'comment_id': {'type': 'string', 'description': '要回复的评论 id（与 comment_uin 成对）'},
+                    'comment_uin': {'type': 'string', 'description': '被回复评论的作者 QQ 号（与 comment_id 成对）'},
+                    'reply_uin': {'type': 'string', 'description': '指定接收者 QQ 号（可选）'},
+                    'reply_name': {'type': 'string', 'description': '指定接收者昵称（可选）'},
+                },
+                'required': ['tid', 'content'],
+            },
+        },
+    },
+    {
+        'type': 'function',
+        'function': {
+            'name': 'qzone_like',
+            'description': '给 QQ 空间某条说说点赞或取消点赞（风险操作，仅主人可指令）。',
+            'parameters': {
+                'type': 'object',
+                'properties': {
+                    'tid': {'type': 'string', 'description': '说说 tid'},
+                    'on': {'type': 'boolean', 'description': 'true=点赞（默认），false=取消点赞'},
+                },
+                'required': ['tid'],
             },
         },
     },
@@ -1326,6 +1445,31 @@ _SCHEMAS = [
             },
         },
     },
+    {
+        'type': 'function',
+        'function': {
+            'name': 'subagent_task',
+            'description': ('把需要大量中间步骤的任务交给子代理，只返回结论。'
+                            '适合：读长文档/长聊天记录、跨多个文件检索、整理大段材料；'
+                            '主人配置了 subagent_extra_tools 时还能用 MCP 浏览器/'
+                            '自定义工具。子代理有自己的上下文，不会污染当前对话。'),
+            'parameters': {
+                'type': 'object',
+                'properties': {
+                    'task': {'type': 'string',
+                             'description': '要子代理完成的具体任务'},
+                    'tools': {'type': 'array', 'items': {'type': 'string'},
+                              'description': '只读工具名（可收窄，省略=全部只读集；'
+                                             '不能借此提权）'},
+                    'max_rounds': {'type': 'integer',
+                                   'description': '最多工具轮，默认 8'},
+                    'context': {'type': 'string',
+                                'description': '可选背景材料（摘要），不要把整段历史塞进来'},
+                },
+                'required': ['task'],
+            },
+        },
+    },
 ]
 
 SCHEMAS_BY_NAME = {s['function']['name']: s for s in _SCHEMAS}
@@ -1344,8 +1488,9 @@ RISKY_TOOL_KEYS = frozenset({
     'request.approve', 'request.reject',
     # 启动/停止长驻监测进程：等同在本机长期执行任意代码
     'watcher.start', 'watcher.stop',
-    # 公开发布 / 删除 QQ 空间说说：外发不可逆操作
-    'qzone.publish', 'qzone.delete',
+    # 公开发布 / 删除 QQ 空间说说、评论、点赞：外发不可逆操作，
+    # 且空间是机器人本人账号，说错话收不回
+    'qzone.publish', 'qzone.delete', 'qzone.comment', 'qzone.like',
 })
 
 
@@ -1385,6 +1530,12 @@ class ToolContext:
     log: object = None
     sender_id: str = ''
     sender_name: str = ''
+    # 安全角色：'' = 按 sender_id 推断（主人/成员）；'readonly' = 只读身份
+    # （子代理），权限引擎只放行只读工具白名单，写/发送一律拒。
+    actor_role: str = ''
+    # 只读身份额外放行的工具（内部 key 或模型函数名）：来自主人配置
+    # subagent_extra_tools，例如 MCP 浏览器工具 / 自定义工具。空 = 纯只读。
+    allow_tools: frozenset = frozenset()
     # 本轮状态：已回看的图片哈希去重；合并转发全量节点缓存（翻页不再请求）
     image_seen: set = field(default_factory=set)
     fw_cache: dict = field(default_factory=dict)
@@ -1850,6 +2001,29 @@ async def dispatch(name: str, args: dict, ctx: ToolContext) -> str:
             return await asyncio.to_thread(
                 _load_image, path, str(args.get('question', '') or ''), ctx,
                 want_grid, box, zoom)
+
+        if name == 'subagent_task':
+            runner = getattr(ctx, 'subagent', None)
+            if runner is None:
+                return '错误: 子代理未启用'
+            from .subagent import SubagentSpec, format_result
+            task = str(args.get('task', '') or '').strip()
+            if not task:
+                return '错误: task 为空'
+            try:
+                max_rounds = int(args.get('max_rounds')
+                                 or ctx.cfg.get('subagent_max_rounds', 8))
+            except (TypeError, ValueError):
+                max_rounds = 8
+            spec = SubagentSpec(
+                task=task,
+                tools=tuple(str(t) for t in (args.get('tools') or ())),
+                max_rounds=max_rounds,
+                timeout_sec=float(ctx.cfg.get('subagent_timeout_sec', 120)),
+                context=str(args.get('context') or '') or None)
+            res = await runner.run(spec, gid=str(ctx.group_id),
+                                   turn_id=str(getattr(ctx, 'turn_id', '') or ''))
+            return format_result(res)
 
         if name == 'read_video':
             # 耗时长（解码 + 子代理），超时由 engine 单独放宽
@@ -2333,9 +2507,13 @@ async def dispatch(name: str, args: dict, ctx: ToolContext) -> str:
                 storage.usage_breakdown, ctx.db_path, ctx.group_id, since)
             return _render_usage_breakdown(bd, days)
 
-        if name in ('qzone_publish', 'qzone_delete', 'qzone_recent'):
+        if name.startswith('qzone_'):
             if ctx.qzone is None:
                 return 'QQ 空间功能未启用'
+            if not ctx.qzone.available():
+                why = getattr(getattr(ctx.qzone, 'cap', None), 'why', '') \
+                    or 'NapCat 通道里没有空间接口（需要 4.18.41+ 的含空间扩展构建）'
+                return 'QQ 空间当前不可用：' + why
             if name == 'qzone_publish':
                 try:
                     ugc_right = int(args.get('ugc_right', 1) or 1)
@@ -2344,9 +2522,43 @@ async def dispatch(name: str, args: dict, ctx: ToolContext) -> str:
                 return await ctx.qzone.publish(
                     args.get('content', ''), ugc_right,
                     args.get('target_uins'),
+                    images=args.get('images'),
                     sender_id=ctx.sender_id, sender_name=ctx.sender_name)
             if name == 'qzone_delete':
                 return await ctx.qzone.delete(args.get('tid', ''))
+            if name == 'qzone_list':
+                try:
+                    limit = int(args.get('limit', 10) or 10)
+                except (TypeError, ValueError):
+                    limit = 10
+                return await ctx.qzone.list_posts(
+                    limit, str(args.get('target_uin') or ''))
+            if name == 'qzone_detail':
+                return await ctx.qzone.post_detail(str(args.get('tid') or ''))
+            if name == 'qzone_images':
+                text, images = await ctx.qzone.read_images(
+                    str(args.get('tid') or ''), args.get('indexes'))
+                if images:
+                    return ToolMediaResult(text=text, images=images)
+                return text
+            if name == 'qzone_feeds':
+                try:
+                    limit = int(args.get('limit', 10) or 10)
+                except (TypeError, ValueError):
+                    limit = 10
+                return await ctx.qzone.list_feeds(limit)
+            if name == 'qzone_comment':
+                return await ctx.qzone.comment(
+                    str(args.get('tid') or ''),
+                    str(args.get('content') or ''),
+                    comment_id=str(args.get('comment_id') or ''),
+                    comment_uin=str(args.get('comment_uin') or ''),
+                    reply_uin=str(args.get('reply_uin') or ''),
+                    reply_name=str(args.get('reply_name') or ''))
+            if name == 'qzone_like':
+                on = args.get('on')
+                on = True if on is None else bool(on)
+                return await ctx.qzone.like(str(args.get('tid') or ''), on)
             try:
                 limit = int(args.get('limit', 10) or 10)
             except (TypeError, ValueError):

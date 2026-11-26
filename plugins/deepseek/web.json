@@ -65,7 +65,23 @@
         "private_on": {"type": "checkbox", "label": "开启私聊对话（默认只接主人和白名单）", "default": true},
         "private_allowed_qqs": {"type": "string", "label": "允许私聊的QQ（逗号分隔，主人恒允许）", "default": ""},
         "qq_file_max_kb": {"type": "int", "label": "QQ文件下载单文件上限KiB", "default": 20480},
-        "risky_owner_only": {"type": "checkbox", "label": "风险操作（写删文件/MCP远程桌面）只听主人", "default": true}
+        "risky_owner_only": {"type": "checkbox", "label": "风险操作（写删文件/MCP远程桌面）只听主人", "default": true},
+        "privileged_tools_on": {"type": "checkbox", "label": "AI 自主执行模式（风险工具不再要求主人本人指令，可在群设置里单独开）", "default": false},
+        "qzone_watch_on": {"type": "checkbox", "label": "QQ空间知会：轮询空间里被@、说说新评论（NapCat 无空间事件，只能轮询；official 通道自动不可用）", "default": true},
+        "qzone_watch_interval": {"type": "int", "label": "QQ空间轮询间隔（秒，最小30）", "default": 300},
+        "qzone_notify_group": {"type": "string", "label": "QQ空间知会投递到哪个群（留空=发主人私聊）", "default": ""},
+        "qzone_image_max_kb": {"type": "int", "label": "QQ空间图片单张下载上限KiB", "default": 10240},
+        "notice_ext_on": {"type": "checkbox", "label": "NapCat扩展通知策略（戳一戳/群名变更/资料赞等）", "default": true},
+        "history_backfill_on": {"type": "checkbox", "label": "断线/重启后补拉群历史（只补本地语料）", "default": true},
+        "qzone_event_write_on": {"type": "checkbox", "label": "空间知会轮允许发/删说说（默认只让模型评论点赞）", "default": false},
+        "mood_every_rounds": {"type": "int", "label": "心情判定间隔轮数（1=每轮；建议3，省一次LLM调用）", "default": 3},
+        "housekeep_on": {"type": "checkbox", "label": "定期清理旧数据（已摘要消息/用量日志/空间事件）", "default": true},
+        "messages_keep": {"type": "int", "label": "每群保留最近消息条数（只清理已摘要的旧行）", "default": 2000},
+        "usage_keep_days": {"type": "int", "label": "用量统计保留天数", "default": 180},
+        "qzone_events_keep_days": {"type": "int", "label": "空间事件保留天数", "default": 30},
+        "poke_back_on": {"type": "checkbox", "label": "被戳一戳时自动回戳", "default": true},
+        "poke_ai_on": {"type": "checkbox", "label": "戳一戳也触发一轮对话（默认关，防刷token）", "default": false},
+        "subagent_extra_tools": {"type": "string", "label": "额外授权给子代理的工具（逗号分隔，支持通配，如 mcp__playwright__browser_*）", "default": ""}
     },
     "call_function": "load_config"
 }

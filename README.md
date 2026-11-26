@@ -56,7 +56,7 @@
 
 ### 1. AI 可以给自己造功能
 
-插件内置了 **65 个工具**，覆盖 QQ 消息、文件、记忆、定时任务、QQ 空间等。更特别的是，AI 可以在这套工具之上继续扩展自己：
+插件内置了 **73 个工具**，覆盖 QQ 消息、文件、记忆、定时任务、QQ 空间等。更特别的是，AI 可以在这套工具之上继续扩展自己：
 
 - **自定义工具（Custom Tools）**：AI 用 `custom_tool_validate` 试写并 dry-run，通过后用 `custom_tool_publish` 上线，工具名变成 `custom__<name>`，之后每轮对话都能直接调用。工具代码只在 `python -I` 短生子进程中执行，崩溃、死循环、`sys.exit` 都不会影响机器人主进程；超时会杀掉整棵进程树。发布失败会自动保留旧版本。
 - **初筛脚本（Screen Scripts）**：AI 可以写「这条群消息值不值得理」的便宜判断脚本，和内置启发式一起作为多判官的第一层。脚本 5 秒超时、异常一律按「未命中」处理，不会因为脚本坏了就放行所有消息。
@@ -112,6 +112,7 @@
 ### 7. 安全是默认值
 
 - 写文件、删文件、发布到公共库、执行 Python/Shell、上线自定义工具/初筛脚本、@全体、发 QQ 空间、启动监测进程、批准好友申请等**风险工具默认只有主人能触发**。
+- 如果要让 AI 自己放手干（任何群友的对话都能驱动它写工作区文件、跑代码），打开 `privileged_tools_on`（「AI 自主执行模式」，默认关，可按群覆盖）：风险工具不再要求主人本人在场，但显式 deny/ask 规则、审批中心、子代理只读身份仍然优先；每次非主人驱动风险工具都会打一条 `[权限]` warn 日志。**群消息可以被提示词注入，只在可信的群里开。**
 - AI 生成的代码永远不在主进程执行，只在短命隔离子进程里跑；工作区禁止绝对路径、`..` 越界和符号链接逃逸。
 - 外部触发服务与实时订阅服务默认只绑 `127.0.0.1`，用 Bearer token 鉴权。
 - 好友申请和拉群邀请**不会自动同意**，只私聊通知主人，等主人让 AI 通过工具处理。
@@ -137,11 +138,11 @@
 ### 工具系统
 
 - **QQ**：发文本/图片/语音、@全体、查群成员、列举和下载群文件。
-- **工作区**：列目录、读、写、追加、删除、发布到公共素材库、查看图片、看视频、文档渲染看图。
+- **工作区**：列目录、读、写、追加、删除、发布到公共素材库、查看图片、看视频、文档渲染看图；写删类默认只有主人能指令，开 `privileged_tools_on` 后 AI 可自主操作本群工作区。
 - **记忆**：查/记群友记忆、查/记自我记忆。
 - **约定与时间**：登记/查询/关闭约定，当前时间。
 - **定时**：登记/查询/取消定时任务，登记/启停/删除轮询。
-- **QQ 空间**：发说说（仅文本）、删说说、查本地留痕（主人）。
+- **QQ 空间**：读说说/评论树/好友动态、看配图、发图文说说、删说说、评论与回复某条评论、点赞（写操作仅主人）；空间被 @ 或说说有新评论时轮询知会（NapCat 没有空间事件，只能轮询）。
 - **请求**：查好友申请/群邀请，同意/拒绝（主人）。
 - **运维**：查历史消息、查 token 用量、管理提示词注入、管理监测进程。
 - **长跑**：申请长跑、结束长跑并汇报。
@@ -264,7 +265,7 @@ python main.py -nogui   # 无头模式（纯控制台日志）
 }
 ```
 
-重启后访问 `http://127.0.0.1:8081`，进入 DeepSeek 插件的「设置」页：
+重启后访问 `http://127.0.0.1:8081`（注意：面板要等与 OneBot 的 WebSocket 连接成功后才启动；连不上时先检查 `ws_address` 与 OneBot 侧配置），进入 DeepSeek 插件的「设置」页：
 
 1. 把 `owner_qq` 设成你的 QQ 号（主人指令和风险工具都靠它鉴权）。
 2. 在「模型服务商」里填写 DeepSeek 的 API Key；也可以不填，改用环境变量 `DEEPSEEK_API_KEY`。
@@ -303,7 +304,7 @@ tide/
 │       ├── Core/
 │       │   ├── engine.py       # 对话主循环、触发、注入、工具调度
 │       │   ├── llm.py          # 多服务商 OpenAI 兼容客户端与路由
-│       │   ├── builtin_tools.py# 65 个内置工具
+│       │   ├── builtin_tools.py# 67 个内置工具
 │       │   ├── custom_tools.py # AI 自定义工具：验证/发布/隔离子进程执行
 │       │   ├── screen_scripts.py # AI 自制消息初筛脚本
 │       │   ├── memory.py       # 群友长期记忆（BM25）
@@ -364,9 +365,9 @@ tide/
 | 键 | 默认值 | 说明 |
 |---|---|---|
 | `transport` | `"napcat"` | `napcat`（OneBot v11）或 `official`（QQ 开放平台 v2） |
-| `ws_address` | `"ws://localhost:8080"` | OneBot WebSocket 地址 |
+| `ws_address` | `"ws://127.0.0.1:3001"` | OneBot WebSocket 地址（NapCat/LLOneBot 默认端口 3001；以你的 OneBot 实现为准） |
 | `token` | `""` | OneBot 访问 token |
-| `http_address` | `""` | NapCat HTTP 接口地址，QQ 空间功能兜底使用 |
+| `http_address` | `""` | NapCat HTTP 接口地址，QQ 空间功能的 HTTP 兜底通道（默认走 WS，可不填） |
 | `http_token` | `""` | NapCat HTTP 访问 token |
 | `show_heartbeat` | `true` | 是否显示心跳日志 |
 | `max_reconnect_attempts` | `0` | 最大重连次数，0 为无限 |
@@ -406,7 +407,8 @@ tide/
 | `live_on` | `true` | SSE 实时订阅服务 |
 | `private_on` | `true` | 私聊总开关 |
 | `private_allowed_qqs` | `""` | 私聊白名单（逗号/空格分隔），主人恒允许 |
-| `risky_owner_only` | `true` | 风险工具仅主人可触发 |
+| `risky_owner_only` | `true` | 风险工具仅主人可触发（`permissions` 为空时的旧门禁） |
+| `privileged_tools_on` | `false` | AI 自主执行模式：风险工具不再要求主人本人指令（可按群开） |
 | `trigger_host` / `trigger_port` | `127.0.0.1` / `8094` | 外部触发服务 |
 | `live_host` / `live_port` | `127.0.0.1` / `8095` | 实时订阅服务 |
 | `trigger_token` | 自动生成 | 外部触发 / SSE 的 Bearer token |
@@ -448,12 +450,21 @@ DeepSeek 插件能力：
 - [外部触发服务与监测进程](docs/trigger-guide.md)
 - [实时订阅 / 弹幕 / 调试台](docs/live-subscription-guide.md)
 - [历史消息与 QQ 空间](docs/history-qzone-guide.md)
+- [NapCat 适配核对（2026-11-26）](docs/napcat-adaptation-review-2026-11-26.md)
 - [好友申请与群邀请审批](docs/request-approval-guide.md)
 - [消息上下文与群记忆设计](docs/message-context-guide.md)
 - [多群多用户下的人格一致与记忆连续](docs/多群聊多用户下的人格一致与记忆连续.md)
 - [记忆回忆链设计](docs/记忆回忆链设计.md)
 - [缓存命中率诊断](docs/缓存命中率诊断.md)
 - [原始插件设计稿（部分内容已过时）](docs/deepseek-plugin-plan.md)
+
+审查与规划（2026-11-25）：
+
+- [当日文档导读](docs/daily-index-2026-11-25.md)
+- [功能缺陷审查](docs/function-bug-audit-2026-11-25.md) / [体验评估](docs/ux-review-2026-11-25.md)
+- [WebUI 美化方案](docs/webui-beautification-plan-2026-11-25.md) / [视觉稿](docs/webui-mockup-2026-11-25.html)
+- [Agent 框架差异书](docs/agent-framework-gap-analysis-2026-11-25.md) / [能力增强方案](docs/agent-framework-enhancement-plan-2026-11-25.md)
+- [方案实施报告](docs/implementation-report-2026-11-25.md)（缺陷 45 条 + 增强 N/M + WebUI M0 实施记录）
 
 ## 安全边界与已知限制
 

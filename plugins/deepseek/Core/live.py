@@ -21,6 +21,8 @@ from __future__ import annotations
 import hmac
 import json
 import os
+import queue
+import socket
 import threading
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -39,6 +41,8 @@ _CLIP = {
     'prompt_view': 8000,
     'text': 4000,
     'content': 4000,
+    # 工具参数：tool_result 事件里是 dict，emit 里序列化后按此上限截断
+    'arguments': 2000,
 }
 
 
@@ -54,6 +58,20 @@ class LiveManager:
     # ── 生命周期 ───────────────────────────────────────────────
 
     def start(self) -> None:
+        # 重入守卫：on_start 可能被重复触发（断线重连/热重载）。已有实例
+        # 必须原样保留——否则新实例绑定同一端口会 OSError，随后把
+        # self._server 置 None，看似已停、实际旧 server 线程仍在跑。
+        if self._server is not None:
+            thread = getattr(self._server, '_thread', None)
+            if thread is None or thread.is_alive():
+                self._log('实时订阅服务已在运行，忽略重复启动', 'warn')
+                return
+            # 线程已退出（极少见）：先关掉残留监听 socket，再重建
+            try:
+                self._server.stop()
+            except Exception:
+                pass
+            self._server = None
         cfg = self.p.cfg
         if not cfg.get('live_on', True):
             self._log('实时订阅服务已关闭（live_on=False）', 'warn')
@@ -65,11 +83,14 @@ class LiveManager:
                       '（请在设置页生成触发 token）', 'error')
             return
         try:
-            self._server = LiveServer(self, host, port)
-            self._server.start()
-            self._log(f'实时订阅服务已监听 http://{host}:{self._server.port()}'
+            server = LiveServer(self, host, port)
+            server.start()
+            self._server = server
+            self._log(f'实时订阅服务已监听 http://{host}:{server.port()}'
                       f'/live/danmaku', 'ok')
         except OSError as e:
+            # 走到这里 _server 只可能是 None（绑定失败在构造阶段抛出），
+            # 不会破坏上面守卫保留的已有实例
             self._server = None
             self._log(f'实时订阅服务启动失败（端口可能被占用）: {e}', 'error')
 
@@ -119,8 +140,62 @@ class LiveManager:
                 })
         except Exception:
             pass
+        # 「固定投递会话」：QQ 空间知会没有群，投递目标是 qzone_notify_group
+        # 或主人私聊。调试台要能直接按它过滤，所以这里显式补进群列表并打标。
+        delivery = None
+        try:
+            from .qzone_watch import notify_target
+            dgid, dchat = notify_target(self.p.cfg)
+            if dgid:
+                delivery = {
+                    'group_id': dgid,
+                    'chat_type': dchat,
+                    'label': ('空间知会 → 主人私聊' if dchat == 'private'
+                              else '空间知会 → 投递群'),
+                }
+                hit = False
+                for g in groups:
+                    if g['group_id'] == dgid:
+                        g['delivery'] = True
+                        g['chat_type'] = dchat
+                        hit = True
+                        break
+                if not hit:
+                    groups.insert(0, {
+                        'group_id': dgid, 'enabled': True, 'persona': '',
+                        'last_active': 0, 'delivery': True,
+                        'chat_type': dchat,
+                    })
+        except Exception:
+            delivery = None
         return {'ok': True, 'version': VERSION,
-                'subscribers': self.bus.count(), 'groups': groups}
+                'subscribers': self.bus.count(), 'groups': groups,
+                'delivery': delivery}
+
+    def history_payload(self, groups=None, kinds=None, before=0,
+                        limit: int = 200, include_prompt: bool = False) -> dict:
+        """/live/api/events：按 seq 游标回看 ring 里的历史事件。
+
+        调试台打开时先拉最近一批，滚动到顶再按 before=最早 seq 往前翻。
+        事件只在进程内 ring（1000 条）里，重启即清空；持久化归档不在本次
+        范围（要的话得落库，那是另一套东西）。
+        """
+        from .live_bus import Subscription
+        g = {str(x).strip() for x in (groups or []) if str(x).strip()}
+        k = {str(x).strip() for x in (kinds or []) if str(x).strip()}
+        sub = Subscription(g, k, bool(include_prompt))
+        limit = max(1, min(int(limit or 200), 500))
+        # 多取一条来判断「还有没有更早的」：ring 是环形的，
+        # 若只把 seq 和全局 oldest 比，按群/类型过滤时会误报（例如更早的
+        # 事件都属别的群，前端仍显示「加载更早」却每次拿到空）
+        evs = self.bus.older(before, limit + 1, sub)
+        has_more = len(evs) > limit
+        if has_more:
+            evs = evs[1:]
+        return {'ok': True, 'events': evs, 'count': len(evs),
+                'oldest_seq': self.bus.oldest_seq(),
+                'latest_seq': self.bus.latest_seq(),
+                'has_more': has_more}
 
     # ── 引擎侧（asyncio 线程）──────────────────────────────────
 
@@ -128,15 +203,33 @@ class LiveManager:
              turn_id: str = '', **fields) -> None:
         """发布一个事件。截断长字段并吞掉一切异常（观测不得影响对话）。"""
         try:
-            for key, limit in _CLIP.items():
-                v = fields.get(key)
-                if isinstance(v, str) and len(v) > limit:
-                    fields[key] = v[:limit] + f'…(+{len(v) - limit}字)'
+            self._clip_fields(fields)
             self.bus.publish(
                 kind, group_id=group_id, chat_type=chat_type,
                 turn_id=turn_id, **fields)
         except Exception:
             pass
+
+    @staticmethod
+    def _clip_fields(fields: dict) -> None:
+        """按 `_CLIP` 原地截断长字段。
+
+        字符串按字符数截断；dict/list（如工具调用 arguments）先 JSON
+        序列化再截断，避免一个超大 tool_result 把单事件撑到几十 KB。
+        """
+        for key, limit in _CLIP.items():
+            v = fields.get(key)
+            if isinstance(v, str):
+                text = v
+            elif isinstance(v, (dict, list)):
+                try:
+                    text = json.dumps(v, ensure_ascii=False)
+                except (TypeError, ValueError):
+                    continue
+            else:
+                continue
+            if len(text) > limit:
+                fields[key] = text[:limit] + f'…(+{len(text) - limit}字)'
 
 
 class LiveServer:
@@ -205,6 +298,28 @@ class LiveServer:
                         return self._reply_json(
                             401, {'ok': False, 'error': 'token 无效或缺失'})
                     return self._reply_json(200, mgr.state_payload())
+                if path == '/live/api/events':
+                    token = (qs.get('token') or [''])[0].strip()
+                    if not mgr.check_token(token):
+                        return self._reply_json(
+                            401, {'ok': False, 'error': 'token 无效或缺失'})
+                    def _csv(name):
+                        return [x for x in (qs.get(name) or [''])[0]
+                                .split(',') if x.strip()]
+                    try:
+                        before = int((qs.get('before') or ['0'])[0] or 0)
+                    except (TypeError, ValueError):
+                        before = 0
+                    try:
+                        limit = int((qs.get('limit') or ['200'])[0] or 200)
+                    except (TypeError, ValueError):
+                        limit = 200
+                    include_prompt = (qs.get('include_prompt') or [''])[0] \
+                        in ('1', 'true', 'yes')
+                    return self._reply_json(200, mgr.history_payload(
+                        groups=_csv('groups'), kinds=_csv('kinds'),
+                        before=before, limit=limit,
+                        include_prompt=include_prompt))
                 self._reply_json(404, {'ok': False, 'error': 'not found'})
 
             def _sse(self, qs):
@@ -229,16 +344,24 @@ class LiveServer:
                 include_prompt = (qs.get('include_prompt') or [''])[0] \
                     in ('1', 'true', 'yes')
 
-                sub = mgr.bus.subscribe(
-                    groups=groups, kinds=kinds,
-                    include_prompt=include_prompt)
-                self.send_response(200)
-                self.send_header('Content-Type',
-                                 'text/event-stream; charset=utf-8')
-                self.send_header('Cache-Control', 'no-store')
-                self.send_header('Connection', 'close')
-                self.end_headers()
+                # 订阅与 header 写入都放进 try：客户端在 header 阶段就断开时，
+                # finally 同样要退订，否则 Subscription 永久留在 LiveBus._subs
+                # （队列 200 条 × 单事件最大 ~21k 字符 ⇒ 4–12MB/个），此后每次
+                # publish 还会白遍历它。
+                sub = None
                 try:
+                    # wfile 写超时：黑洞/极慢客户端不能把 handler 线程卡在 TCP
+                    # 重传上（线程闭包持有 LiveManager → 整个旧插件实例）。
+                    self.connection.settimeout(30)
+                    sub = mgr.bus.subscribe(
+                        groups=groups, kinds=kinds,
+                        include_prompt=include_prompt)
+                    self.send_response(200)
+                    self.send_header('Content-Type',
+                                     'text/event-stream; charset=utf-8')
+                    self.send_header('Cache-Control', 'no-store')
+                    self.send_header('Connection', 'close')
+                    self.end_headers()
                     self.wfile.write(b'retry: 3000\n\n')
                     # 建连问候帧：回显服务端实际生效的过滤条件，页面据此区分
                     # 「已连接但当前群没动静」与「根本没连上/token 失效」
@@ -250,12 +373,11 @@ class LiveServer:
                     for ev in mgr.bus.replay(
                             self.headers.get('Last-Event-ID'), sub):
                         self._write_event(ev)
-                    self.wfile.flush()
                     while True:
                         try:
                             item = sub.queue.get(timeout=20)
-                        except Exception:
-                            # queue.Empty：注释行心跳，保活兼探活
+                        except queue.Empty:
+                            # 注释行心跳，保活兼探活
                             self.wfile.write(b': ping\n\n')
                             self.wfile.flush()
                             continue
@@ -269,10 +391,13 @@ class LiveServer:
                                  'note': f'消费者过慢，已丢弃 {n} 个旧事件'},
                                 with_id=False)
                         self._write_event(item)
-                except (BrokenPipeError, ConnectionResetError, OSError):
+                except (socket.timeout, BrokenPipeError,
+                        ConnectionResetError, OSError):
+                    # 客户端断开 / 写超时：静默退出，finally 负责退订
                     pass
                 finally:
-                    mgr.bus.unsubscribe(sub)
+                    if sub is not None:
+                        mgr.bus.unsubscribe(sub)
 
             def _write_event(self, ev: dict, with_id: bool = True):
                 seq = ev.get('seq') or 0

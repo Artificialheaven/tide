@@ -1,58 +1,7 @@
-<!doctype html>
-<html lang="zh-CN">
-<head>
-<meta charset="utf-8">
-<title>DeepSeek 群AI · B站直播</title>
-<style>
-body{background:#1a1d23;color:#d7dae0;font:14px/1.6 "Microsoft YaHei",sans-serif;margin:0}
-nav{background:#22262e;padding:10px 20px;border-bottom:1px solid #333}
-nav a{color:#7aa2f7;margin-right:16px;text-decoration:none}
-.wrap{padding:20px;max-width:920px;margin:auto}
-fieldset{border:1px solid #333;border-radius:6px;margin-bottom:16px;padding:12px 16px}
-legend{color:#8b93a7;padding:0 6px}
-label{display:block;margin:8px 0}
-input,select,textarea{background:#22262e;color:#eceff4;border:1px solid #3b4252;border-radius:4px;padding:6px 8px;box-sizing:border-box}
-input[type=number],input[type=text],select{width:120px}
-textarea{width:100%;height:90px}
-input[type=checkbox]{width:auto;margin-right:6px}
-button{background:#5e81ac;color:#fff;border:0;border-radius:4px;padding:7px 16px;cursor:pointer;margin-right:8px}
-button.danger{background:#bf616a}
-button.ok{background:#a3be8c;color:#1a1d23}
-button:disabled{opacity:.45;cursor:default}
-.hint{color:#8b93a7;font-size:12px}
-.card{border:1px solid #333;border-radius:8px;padding:14px 18px;margin-bottom:18px;background:#1f232b}
-.card h3{margin:0 0 8px}
-.badge{display:inline-block;border-radius:10px;padding:1px 10px;font-size:12px;margin-left:8px}
-.b-run{background:#3b5323;color:#a3be8c}
-.b-stop{background:#4c3434;color:#d08770}
-.b-stale{background:#4c4434;color:#ebcb8b}
-.stat{color:#8b93a7;font-size:12px;margin-right:14px;white-space:nowrap}
-.row{display:flex;gap:14px;flex-wrap:wrap;align-items:center}
-pre.logs{background:#15171c;border:1px solid #2e333d;border-radius:6px;padding:10px;height:220px;
-  overflow:auto;font:12px/1.5 Consolas,monospace;white-space:pre-wrap;margin:10px 0 0}
-dialog{background:#22262e;color:#eceff4;border:1px solid #3b4252;border-radius:8px;padding:22px;width:340px}
-dialog::backdrop{background:rgba(0,0,0,.55)}
-dialog img{display:block;margin:10px auto;background:#fff;padding:8px;border-radius:6px;width:240px;height:240px}
-table{border-collapse:collapse;width:100%;font-size:13px}
-th,td{border-bottom:1px solid #2e333d;padding:5px 8px;text-align:left;vertical-align:top}
-th{color:#8b93a7;font-weight:normal}
-.tag{display:inline-block;background:#2d3340;border-radius:4px;padding:0 6px;font-size:12px;color:#a3be8c}
-.sess-body{background:#15171c;border-radius:6px;padding:10px;margin:6px 0;white-space:pre-wrap;
-  font-size:13px;max-height:260px;overflow:auto}
-</style>
-</head>
-<body>
-<nav>
-  <a href="/deepseek/dashboard?v={{ PLUGIN_VERSION }}">群开关</a>
-  <a href="/deepseek/group?v={{ PLUGIN_VERSION }}">群设置</a>
-  <a href="/deepseek/settings?v={{ PLUGIN_VERSION }}">全局设置</a>
-  <a href="/deepseek/mcp?v={{ PLUGIN_VERSION }}">MCP 工具</a>
-  <a href="/deepseek/memory?v={{ PLUGIN_VERSION }}">群友记忆</a>
-  <a href="/deepseek/runs?v={{ PLUGIN_VERSION }}">后台/轮询</a>
-  <a href="/deepseek/prompts?v={{ PLUGIN_VERSION }}">提示词</a>
-  <a href="/deepseek/live?v={{ PLUGIN_VERSION }}" style="color:#ebcb8b">B站直播</a>
-  <span class="hint" style="float:right">v{{ PLUGIN_VERSION }}</span>
-</nav>
+{% extends "base.html" %}
+{% block title %}B 站直播 · 大肥鱼{% endblock %}
+{% block page_title %}B 站直播{% endblock %}
+{% block content %}
 <div class="wrap">
 <h2>B 站直播 AI</h2>
 
@@ -102,9 +51,10 @@ th{color:#8b93a7;font-weight:normal}
     <button type="button" id="bQrClose">关闭</button>
   </div>
 </dialog>
-</div>
-
+{% endblock %}
+{% block scripts %}
 <script>
+
 const api = async (u, opt) => {
   const r = await fetch('/deepseek'+u, opt);
   return r.json().catch(()=>({ok:false,error:'bad json'}));
@@ -285,8 +235,8 @@ async function refreshCred(force){
   const r = await api('/api/live/credential'+(force?'?force=1':''));
   if(!r.ok){el.textContent='凭据状态读取失败：'+r.error;return;}
   const i = r.info||{};
-  if(!i.logged_in){el.innerHTML='<b style="color:#d08770">未登录</b>，启动直播前请先扫码。';}
-  else if(i.valid===false){el.innerHTML=`已保存 uid=${esc(i.uid)}，但<b style="color:#d08770">校验失败（可能过期）</b>，建议重新扫码。`;}
+  if(!i.logged_in){el.innerHTML='<b class="warn">未登录</b>，启动直播前请先扫码。';}
+  else if(i.valid===false){el.innerHTML=`已保存 uid=${esc(i.uid)}，但<b class="warn">校验失败（可能过期）</b>，建议重新扫码。`;}
   else{el.innerHTML=`已登录：<b>${esc(i.uname||'')}</b>（uid ${esc(i.uid)}）${i.uname?'':'（未强制校验）'}
     <button type="button" id="bCredCheck" style="padding:2px 10px;margin-left:8px">校验</button>`;
     document.getElementById('bCredCheck').onclick=()=>refreshCred(true);}
@@ -380,7 +330,7 @@ async function refreshIdent(){
       if(r.ok){
         const c = r.counts||{};
         msg.innerHTML = `已迁移：消息 ${c.messages??0} / 记忆 ${c.memories??0} / 约定 ${c.commitments??0}`
-          + (r.is_owner?' <b style="color:#d08770">（主人 QQ）</b>':'');
+          + (r.is_owner?' <b class="warn">（主人 QQ）</b>':'');
         await new Promise(r=>setTimeout(r,1200));
         refreshIdent();
       } else msg.textContent = '失败：'+esc(r.error);
@@ -452,6 +402,6 @@ async function refreshSessions(){
   setInterval(refresh, 4000);
   setInterval(()=>{ refreshIdent(); refreshSessions(); }, 8000);
 })();
+
 </script>
-</body>
-</html>
+{% endblock %}

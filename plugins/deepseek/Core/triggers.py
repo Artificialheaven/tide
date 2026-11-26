@@ -17,6 +17,7 @@ GET /trigger 是健康检查，不需 token。
 """
 from __future__ import annotations
 
+import asyncio
 import datetime as _dt
 import hmac
 import json
@@ -31,6 +32,22 @@ from .config import resolve_group
 MAX_BODY_BYTES = 65536
 WEEK_CN = ('一', '二', '三', '四', '五', '六', '日')
 _SOURCE_RE = re.compile(r'^[0-9A-Za-z_一-鿿.\-]{1,40}$')
+
+# 同时最多跑几个后台 AI 轮；外部监测程序突发推送时超限直接跳过并记日志，
+# 避免持有 group_lock 的长跑任务无限堆积（审计 P2-11）
+MAX_CONCURRENT_FIRES = 4
+
+# stop() 里调度出去的“取消 + gather 回收”任务强引用，防 GC
+_REAPERS: set = set()
+
+
+async def _cancel_and_wait(tasks: list) -> None:
+    """取消并 gather 回收触发 task；单条异常/取消不影响其它任务。"""
+    for task in tasks:
+        if not task.done():
+            task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def trigger_user_text(now: _dt.datetime, source: str, text: str) -> str:
@@ -59,6 +76,9 @@ class TriggerManager:
         self._server: TriggerServer | None = None
         self._last_fire: dict[tuple, float] = {}
         self._lock = threading.Lock()
+        # 在途后台轮 task 的强引用：create_task 不保引用会被 GC 提前回收，
+        # 且 stop() 要能取消它们（审计 P2-11）
+        self._tasks: set = set()
 
     # ── 生命周期 ───────────────────────────────────────────────
 
@@ -88,6 +108,45 @@ class TriggerManager:
             except Exception:
                 pass
             self._server = None
+        self._stop_tasks()
+
+    def _stop_tasks(self) -> None:
+        """取消全部在途触发 task 并调度有界回收（审计 P2-11）。
+
+        stop() 必须保持同步签名（插件 on_stop 经 _seg_sync 同步调用），
+        所以这里只 cancel + 把 gather 回收协程调度到事件循环，不在此 await。
+        """
+        tasks = [t for t in list(self._tasks) if not t.done()]
+        if not tasks:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is not None:
+            # 已经在 asyncio 线程：直接建 reaper（强引用防 GC）
+            reaper = loop.create_task(_cancel_and_wait(tasks))
+            _REAPERS.add(reaper)
+            reaper.add_done_callback(_REAPERS.discard)
+            return
+        # 非事件循环线程（GUI/atexit/卸载路径）：投递到主循环执行取消
+        from core import globals
+        loop = getattr(globals, 'event_loop', None)
+        if loop is not None and loop.is_running():
+            try:
+                future = asyncio.run_coroutine_threadsafe(
+                    _cancel_and_wait(tasks), loop)
+                _REAPERS.add(future)
+                future.add_done_callback(_REAPERS.discard)
+                return
+            except Exception:
+                pass
+        # 事件循环已停：就地 cancel，至少不让 task 继续持有旧实例
+        for task in tasks:
+            try:
+                task.cancel()
+            except Exception:
+                pass
 
     def address(self) -> str:
         if self._server is None:
@@ -120,6 +179,12 @@ class TriggerManager:
             if cooldown and now - last < cooldown:
                 return False, 'cooldown'
             self._last_fire[key] = now
+            # 长期运行按“群 + source”无限积累：超过阈值时清掉一天前的旧键
+            if len(self._last_fire) > 256:
+                cutoff = now - 86400
+                for k, ts in list(self._last_fire.items()):
+                    if ts < cutoff:
+                        self._last_fire.pop(k, None)
         return True, ''
 
     def schedule_fire(self, gid: str, text: str, source: str) -> bool:
@@ -132,8 +197,19 @@ class TriggerManager:
         return True
 
     def _spawn(self, gid: str, text: str, source: str) -> None:
-        import asyncio
-        asyncio.create_task(self.fire(str(gid), text, source))
+        """把后台轮包装成受管 task：强引用 + 并发上限（审计 P2-11）。
+
+        超限时直接跳过并记日志（不排队），避免外部监测突发推送把
+        持有 group_lock 的长跑 AI 轮无限堆积。
+        """
+        if len(self._tasks) >= MAX_CONCURRENT_FIRES:
+            self._log(
+                f'外部触发并发已达上限 {MAX_CONCURRENT_FIRES}，跳过本次触发'
+                f'（群 {gid}，source={source or "-"}）', 'warn')
+            return
+        task = asyncio.create_task(self.fire(str(gid), text, source))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
 
     async def fire(self, gid: str, text: str, source: str = '') -> None:
         """在 asyncio 线程执行：锁内重检后跑后台轮。异常只记录不外泄。"""

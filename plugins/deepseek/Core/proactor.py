@@ -232,7 +232,11 @@ class ProactorManager:
         if qerr:
             self._log(f'主动搭话安静时段配置有误（本轮按未设置处理）: {qerr}',
                       'warn')
-        groups = [g for g in storage.list_groups(self.db_path) if g['enabled']]
+        # P1-9：全量列表是同步 sqlite 查询，丢线程池，别卡事件循环
+        all_groups = await asyncio.to_thread(storage.list_groups, self.db_path)
+        groups = [g for g in all_groups
+                  if g.get('enabled')
+                  and (g.get('settings') or {}).get('chat_type') != 'private']
         now = _dt.datetime.now()
         for g in groups:
             gid = str(g['group_id'])

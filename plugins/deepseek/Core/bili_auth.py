@@ -89,7 +89,11 @@ def credential_mtime() -> float:
 
 def credential_snapshot() -> dict:
     """不触网的文件级状态（面板轮询用）。"""
-    cred = load_credential()
+    try:
+        cred = load_credential()
+    except ImportError as e:
+        return {'logged_in': False, 'missing_dependency': str(e),
+                'hint': 'pip install bilibili-api-python aiohttp qrcode'}
     if cred is None:
         return {'logged_in': False}
     return {
@@ -110,7 +114,12 @@ async def validate(force: bool = False) -> dict:
         return dict(_valid_cache)
     out = {'logged_in': False, 'uid': '', 'uname': '',
            'valid': False, 'mtime': mt}
-    cred = load_credential()
+    try:
+        cred = load_credential()
+    except ImportError as e:
+        out['missing_dependency'] = str(e)
+        out['hint'] = 'pip install bilibili-api-python aiohttp qrcode'
+        return out
     if cred is not None:
         try:
             ok = bool(await cred.check_valid())

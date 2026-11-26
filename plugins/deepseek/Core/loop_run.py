@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as _dt
+import json
 import traceback
 
 from .asyncutil import wait_resilient
@@ -73,7 +74,25 @@ class LoopManager:
         return str(gid) in self._tasks
 
     def _chat_type(self, gid: str) -> str:
-        return ('private' if str(gid) == str(self.p.cfg.get('owner_qq', ''))
+        # 优先用会话建立时打上的 chat_type 标记（私聊与群共用 groups 表，
+        # 私聊在 _handle_private 里写了 settings.chat_type='private'）。
+        # 仅靠 gid==owner_qq 反推会漏掉「好友私聊长跑」：任务 gid 是好友 QQ，
+        # 会被当成群，启动/汇报全按群消息发到好友号上，必然失败。
+        #
+        # 注意不能经 resolve_group() 取：chat_type 是会话传输元数据，不在
+        # GROUP_OVERRIDABLE 白名单里，会被 resolver 丢掉。这里直接读原始 settings。
+        gid = str(gid)
+        try:
+            row = storage.get_group(self.p.db_path, gid) or {}
+            raw = row.get('settings') or {}
+            if isinstance(raw, str):
+                raw = json.loads(raw or '{}')
+            ct = str((raw or {}).get('chat_type') or '')
+            if ct in ('private', 'group'):
+                return ct
+        except Exception:
+            pass
+        return ('private' if gid == str(self.p.cfg.get('owner_qq', ''))
                 else 'group')
 
     def status_text(self, gid: str) -> str:
@@ -184,11 +203,9 @@ class LoopManager:
         }
         chat_type = self._chat_type(gid)
         try:
-            # 整个长跑期间一次持有群锁：普通消息排队、/ai 指令不持锁照常处理、
-            # 群友插话走 InterruptHub 锁外插队通道
-            async with self.p.group_lock(gid):
-                await self._run_locked(gid, session_id, task,
-                                       chat_type, loop_ctx)
+            # P1-6：不再整段持锁数小时；群锁按轮 acquire/release 在
+            # _run_locked 内部处理，轮间释放给普通消息/指令。
+            await self._run_locked(gid, session_id, task, chat_type, loop_ctx)
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -211,92 +228,99 @@ class LoopManager:
 
     async def _run_locked(self, gid: str, session_id: int, task: str,
                           chat_type: str, loop_ctx: dict):
-        """持有群锁的长跑主循环（调用方已持锁）。"""
+        """长跑主循环：P1-6 每轮单独持群锁，轮间释放。
+
+        以前整段持锁几小时，普通消息只能等长跑结束；现在只有单轮
+        （一次模型调用 + 工具执行）占锁，轮间 sleep 不占锁。stop() 只在
+        DB 里改状态，当前轮允许自然跑完，下一轮开头检查到非 running 即退出。
+        """
         turn = 0
         idle_turns = 0
         while True:
-            # 状态位检查（主人 /ai loop 关）
+            # 状态位检查（主人 /ai loop 关）；本轮锁已释放，可随时被叫停
             sess = storage.get_loop_session(self.p.db_path, session_id)
             if not sess or sess['status'] != 'running':
                 self._log(f'群 {gid} 长跑#{session_id} 状态变为 '
                           f'{sess and sess["status"]}，worker 退出', 'warn')
                 return
-            row = storage.get_group(self.p.db_path, gid)
-            cfg = resolve_group(self.p.cfg, (row or {}).get('settings'))
-            if not cfg.get('loop_on', True):
-                storage.update_loop_session(
-                    self.p.db_path, session_id, status='stopped',
-                    ended_at=_dt.datetime.now().timestamp())
-                return
+            # 单轮持锁：与普通消息轮串行，避免同群两轮并发写上下文
+            async with self.p.group_lock(gid):
+                row = storage.get_group(self.p.db_path, gid)
+                cfg = resolve_group(self.p.cfg, (row or {}).get('settings'))
+                if not cfg.get('loop_on', True):
+                    storage.update_loop_session(
+                        self.p.db_path, session_id, status='stopped',
+                        ended_at=_dt.datetime.now().timestamp())
+                    return
 
-            turn += 1
-            notice = _start_notice(task) if turn == 1 \
-                else _continue_notice(task, idle_turns)
-            storage.insert_message(
-                self.p.db_path, gid, 'user', notice,
-                sender_id='', sender_name='系统', name='loop-notice')
-            storage.upsert_group(self.p.db_path, gid, touch=True)
-            parsed = ParsedMessage(
-                text=notice, sender_id='', sender_name='系统',
-                at_me=True, chat_type=chat_type, allow_silent=False)
+                turn += 1
+                notice = _start_notice(task) if turn == 1 \
+                    else _continue_notice(task, idle_turns)
+                storage.insert_message(
+                    self.p.db_path, gid, 'user', notice,
+                    sender_id='', sender_name='系统', name='loop-notice')
+                storage.upsert_group(self.p.db_path, gid, touch=True)
+                parsed = ParsedMessage(
+                    text=notice, sender_id='', sender_name='系统',
+                    at_me=True, chat_type=chat_type, allow_silent=False)
 
-            run_id = storage.bg_run_start(
-                self.p.db_path, 'loop', chat_type, gid,
-                f'[长跑#{session_id}] {task}'[:4000],
-                started_at=_dt.datetime.now().timestamp())
-            trace: list = []
-            loop_ctx['tools_this_turn'] = 0
-            try:
-                res = await self.p.engine._run_turn(
-                    gid, cfg, parsed, True, None, background=True,
-                    trace=trace, raw_bg_notice=True, source_kind='work',
-                    loop_ctx=loop_ctx)
-            except Exception as e:
+                run_id = storage.bg_run_start(
+                    self.p.db_path, 'loop', chat_type, gid,
+                    f'[长跑#{session_id}] {task}'[:4000],
+                    started_at=_dt.datetime.now().timestamp())
+                trace: list = []
+                loop_ctx['tools_this_turn'] = 0
+                try:
+                    res = await self.p.engine._run_turn(
+                        gid, cfg, parsed, True, None, background=True,
+                        trace=trace, raw_bg_notice=True, source_kind='work',
+                        loop_ctx=loop_ctx)
+                except Exception as e:
+                    storage.bg_run_finish(
+                        self.p.db_path, run_id, 'error', '', trace, str(e),
+                        keep=int(cfg.get('bg_runs_keep', 200)))
+                    raise
+
+                storage.bump_loop_rounds(
+                    self.p.db_path, session_id, loop_ctx['total_rounds'])
+                # 每个续跑轮收尾时她都会在群里留下终态正文，汇报节奏按轮重新计数
+                if res['final_text']:
+                    loop_ctx['since_spoke'] = 0
+                status = ('silent' if res['silent']
+                          else ('empty' if not res['final_text'] else 'ok'))
                 storage.bg_run_finish(
-                    self.p.db_path, run_id, 'error', '', trace, str(e),
+                    self.p.db_path, run_id, status, res['final_text'], trace,
                     keep=int(cfg.get('bg_runs_keep', 200)))
-                raise
 
-            storage.bump_loop_rounds(
-                self.p.db_path, session_id, loop_ctx['total_rounds'])
-            # 每个续跑轮收尾时她都会在群里留下终态正文，汇报节奏按轮重新计数
-            if res['final_text']:
-                loop_ctx['since_spoke'] = 0
-            status = ('silent' if res['silent']
-                      else ('empty' if not res['final_text'] else 'ok'))
-            storage.bg_run_finish(
-                self.p.db_path, run_id, status, res['final_text'], trace,
-                keep=int(cfg.get('bg_runs_keep', 200)))
-
-            # 收尾判定
-            sess = storage.get_loop_session(self.p.db_path, session_id)
-            if not sess or sess['status'] != 'running':
-                return
-            if loop_ctx['finished']:
-                result = loop_ctx.get('finish_text', '') or res['final_text']
-                storage.update_loop_session(
-                    self.p.db_path, session_id, status='done',
-                    result=result[:2000],
-                    ended_at=_dt.datetime.now().timestamp())
-                await self._finish_announce(gid, chat_type, session_id,
-                                            task, result, 'done')
-                return
-            if loop_ctx.get('tools_this_turn', 0) == 0:
-                idle_turns += 1
-            else:
-                idle_turns = 0
-            idle_limit = max(1, int(cfg.get('loop_idle_turn_limit', 3)))
-            if idle_turns >= idle_limit:
-                storage.update_loop_session(
-                    self.p.db_path, session_id, status='done',
-                    result='连续多轮未进行工具操作，判定任务已结束（空转保护）',
-                    ended_at=_dt.datetime.now().timestamp())
-                await self._finish_announce(
-                    gid, chat_type, session_id, task,
-                    '她连续几轮没有继续操作，长跑已自动结束。'
-                    '如任务其实没完，可再次 /ai loop 开启。', 'idle')
-                return
-            # 让出事件循环一圈（插队投递/通知等得以处理）
+                # 收尾判定
+                sess = storage.get_loop_session(self.p.db_path, session_id)
+                if not sess or sess['status'] != 'running':
+                    return
+                if loop_ctx['finished']:
+                    result = loop_ctx.get('finish_text', '') or res['final_text']
+                    storage.update_loop_session(
+                        self.p.db_path, session_id, status='done',
+                        result=result[:2000],
+                        ended_at=_dt.datetime.now().timestamp())
+                    await self._finish_announce(gid, chat_type, session_id,
+                                                task, result, 'done')
+                    return
+                if loop_ctx.get('tools_this_turn', 0) == 0:
+                    idle_turns += 1
+                else:
+                    idle_turns = 0
+                idle_limit = max(1, int(cfg.get('loop_idle_turn_limit', 3)))
+                if idle_turns >= idle_limit:
+                    storage.update_loop_session(
+                        self.p.db_path, session_id, status='done',
+                        result='连续多轮未进行工具操作，判定任务已结束（空转保护）',
+                        ended_at=_dt.datetime.now().timestamp())
+                    await self._finish_announce(
+                        gid, chat_type, session_id, task,
+                        '她连续几轮没有继续操作，长跑已自动结束。'
+                        '如任务其实没完，可再次 /ai loop 开启。', 'idle')
+                    return
+            # 轮间让出事件循环一圈（锁已释放，插队投递/普通消息得以处理）
             await asyncio.sleep(1)
 
     async def _finish_announce(self, gid, chat_type, session_id, task,

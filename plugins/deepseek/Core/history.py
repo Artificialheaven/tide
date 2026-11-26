@@ -35,6 +35,12 @@ def parse_time(s: str, now=None) -> float:
     if not s:
         raise ValueError('空时间')
     if s.isdigit() and len(s) >= 8:
+        if len(s) == 8:
+            # 20261125 这类 YYYYMMDD 不能当 UNIX 秒（会被解析成 1970 年）
+            try:
+                return _dt.datetime.strptime(s, '%Y%m%d').timestamp()
+            except ValueError:
+                pass
         return float(s)
     now = now or _dt.datetime.now()
     for fmt in _TIME_FORMATS:

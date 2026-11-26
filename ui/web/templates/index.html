@@ -3,13 +3,14 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>NapCatBot 管理面板</title>
+<title>大肥鱼 · 管理面板</title>
+<link rel="stylesheet" href="/static/tds/tokens.css">
 <style>
 :root {
-  --bg: #0f1117; --card: #1a1d27; --border: #2a2d3a;
-  --text: #c9d1d9; --muted: #6e7681; --accent: #58a6ff;
-  --green: #3fb950; --red: #f85149; --yellow: #d2991d;
-  --purple: #a371f7; --orange: #db6d28;
+  --bg: #0B1018; --card: #121A28; --border: #1E293B;
+  --text: #E9EFF8; --muted: #8494AB; --accent: #45C4F5;
+  --green: #3FB950; --red: #F85149; --yellow: #D29922;
+  --purple: #A371F7; --orange: #DB6D28;
 }
 * { margin:0; padding:0; box-sizing:border-box; }
 body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
@@ -98,7 +99,7 @@ tr:hover { background:rgba(255,255,255,.02); }
 
 /* ---------- 日志 ---------- */
 .log-list { background:var(--bg); border:1px solid var(--border);
-  border-radius:8px; max-height:500px; overflow-y:auto; padding:12px;
+  border-radius:8px; max-height:calc(100vh - 250px); min-height:320px; overflow-y:auto; padding:12px;
   font-family:'Cascadia Code','Fira Code',monospace; font-size:12px; }
 .log-line { padding:4px 0; display:flex; gap:10px; border-bottom:1px solid rgba(255,255,255,.03); }
 .log-time { color:var(--muted); min-width:60px; }
@@ -143,7 +144,7 @@ tr:hover { background:rgba(255,255,255,.02); }
 <!-- ================= 登录页 ================= -->
 <div class="login-wrap" id="loginPage">
   <div class="login-card">
-    <h1>NapCatBot</h1>
+    <h1>大肥鱼</h1>
     <p>请输入管理密码</p>
     <input type="password" id="loginPwd" placeholder="Token / 密码"
            autofocus onkeydown="if(event.key==='Enter')doLogin()">
@@ -155,7 +156,7 @@ tr:hover { background:rgba(255,255,255,.02); }
 <!-- ================= 主面板 ================= -->
 <div class="app" id="mainApp">
   <header>
-    <h1>🔥 NapCatBot</h1>
+    <h1>🐟 大肥鱼</h1>
     <div class="header-right">
       <span class="badge badge-ok" id="wsBadge">● 已连接</span>
       <button class="btn btn-red btn-sm" onclick="doLogout()">登出</button>
@@ -181,7 +182,7 @@ tr:hover { background:rgba(255,255,255,.02); }
     <div class="card" style="max-width:700px">
       <h3>系统配置</h3>
       <form id="configForm" style="margin-top:16px"></form>
-      <button class="btn btn-green" onclick="saveConfig()" style="margin-top:16px">💾 保存配置</button>
+      <button class="btn btn-green" id="saveConfigBtn" onclick="saveConfig()" style="margin-top:16px">💾 保存配置</button>
       <span id="configMsg" style="margin-left:12px;font-size:13px"></span>
     </div>
   </div>
@@ -204,12 +205,22 @@ tr:hover { background:rgba(255,255,255,.02); }
 
   <!-- ====== 日志 ====== -->
   <div class="tab" id="tab-logs">
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
-      <h3 style="font-size:16px">实时日志</h3>
-      <div>
-        <label style="font-size:12px;color:var(--muted);margin-right:8px">自动滚动</label>
-        <input type="checkbox" id="autoScroll" checked>
-        <button class="btn btn-sm" onclick="clearLogs()" style="margin-left:8px">清空</button>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;gap:12px;flex-wrap:wrap">
+      <h3 style="font-size:16px;margin:0">实时日志 <span id="logCount" style="font-size:12px;color:var(--muted);font-weight:400"></span></h3>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <input id="logSearch" placeholder="搜索来源/内容…" oninput="applyLogFilter()"
+               style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);font-size:13px;width:200px">
+        <select id="logLevel" onchange="applyLogFilter()"
+                style="padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);font-size:13px">
+          <option value="">全部级别</option><option value="红色">错误</option>
+          <option value="黄色">警告</option><option value="绿色">成功</option>
+          <option value="蓝色">信息</option>
+        </select>
+        <button class="btn btn-sm" id="logPause" onclick="toggleLogPause()">暂停</button>
+        <label style="font-size:12px;color:var(--muted)">自动滚动
+          <input type="checkbox" id="autoScroll" checked></label>
+        <button class="btn btn-sm" onclick="clearLogs()">清空</button>
+        <button class="btn btn-sm" onclick="downloadLogs()" title="导出当前过滤结果">导出</button>
       </div>
     </div>
     <div class="log-list" id="logContainer"></div>
@@ -230,11 +241,25 @@ tr:hover { background:rgba(255,255,255,.02); }
 </div>
 
 <!-- ================= 脚本 ================= -->
-<script async src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+<script src="/static/vendor/socket.io.min.js"></script>
 <script>
 // ====== 全局状态 ======
 let socket = null;
 let activeTab = 'dash';
+
+// 401 统一处理：任何接口掉登录态都回到登录页，避免白屏/半截界面（U-16）
+const __fetch = window.fetch.bind(window);
+window.fetch = async function (url, opts) {
+  const resp = await __fetch(url, opts);
+  if (resp.status === 401 && !String(url).includes('/api/login')) {
+    document.getElementById('mainApp').classList.remove('active');
+    document.getElementById('loginPage').style.display = 'flex';
+    const err = document.getElementById('loginError');
+    err.textContent = '登录已过期，请重新输入密码';
+    err.style.display = 'block';
+  }
+  return resp;
+};
 
 // ====== 初始化 ======
 (async function init() {
@@ -416,42 +441,59 @@ async function loadConfig() {
   }).join('');
 }
 
-async function saveConfig() {
-  const msg = document.getElementById('configMsg');
+function collectConfigData(msg) {
   const data = {};
   for (const f of CONFIG_FIELDS) {
     if (f.section) continue;
     const el = document.querySelector(`#configForm [name="${f.key}"]`);
     if (!el) continue;
     if (f.type === 'checkbox') {
-      data[f.key] = el.checked;                 // 取消勾选必须显式发 false
+      data[f.key] = el.checked;                // 取消勾选必须显式发 false
     } else if (f.type === 'number') {
       if (el.value.trim() === '') {
         msg.textContent = `❌ ${f.label} 不能为空`;
         msg.style.color = 'var(--red)';
-        return;
+        return null;
       }
-      data[f.key] = parseInt(el.value, 10);    // 空串不再被误写成 false
+      data[f.key] = parseInt(el.value, 10);
     } else {
-      data[f.key] = el.value;                  // 文本/密码：空串就是空串
+      data[f.key] = el.value;
     }
   }
-  const resp = await fetch('/api/config', {
-    method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify(data)
-  });
-  const r = await resp.json();
-  if (r.ok) {
-    msg.textContent='✅ 保存成功（部分项需重连/重启生效）';
-    msg.style.color='var(--green)';
-    loadConfig();   // 重新拉取，掩码/规整后的值与服务端对齐
-  } else {
-    msg.textContent='❌ 保存失败：' + (r.error || '未知错误');
-    msg.style.color='var(--red)';
+  return data;
+}
+
+async function saveConfig() {
+  const msg = document.getElementById('configMsg');
+  const btn = document.getElementById('saveConfigBtn');
+  if (btn) { btn.disabled = true; btn.dataset.label = btn.textContent; btn.textContent = '保存中…'; }
+  msg.textContent = '保存中…'; msg.style.color = 'var(--muted)';
+  try {
+    const data = collectConfigData(msg);
+    if (!data) return;
+    const resp = await fetch('/api/config', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(data)
+    });
+    const r = await resp.json();
+    if (r.ok) {
+      msg.textContent='✅ 保存成功（部分项需重连/重启生效）';
+      msg.style.color='var(--green)';
+      loadConfig();   // 重新拉取，掩码/规整后的值与服务端对齐
+    } else {
+      msg.textContent='❌ 保存失败：' + (r.error || '未知错误');
+      msg.style.color='var(--red)';
+    }
+  } catch (e) {
+    msg.textContent = '❌ 保存失败：' + (e && e.message ? e.message : '网络错误');
+    msg.style.color = 'var(--red)';
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = btn.dataset.label || '💾 保存配置'; }
   }
 }
 
- // ====== 插件 ======
+// ====== 插件 ======
+function escHtml(s){return String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
 async function loadPlugins() {
   const resp = await fetch('/api/plugins');
   const data = await resp.json();
@@ -461,7 +503,9 @@ async function loadPlugins() {
     <tr>
       <td>${v.name||k}</td>
       <td>${v.version||'—'}</td>
-      <td style="color:var(--muted)">${v.description||'—'}</td>
+      <td style="color:var(--muted)">${escHtml(v.description||'—')}${v.error
+        ? `<div style="color:var(--red);font-size:12px;margin-top:3px">⚠ ${escHtml(v.error)}</div>`
+        : ''}</td>
       <td><span class="badge ${v.enabled?'badge-ok':'badge-warn'}">${v.enabled?'启用':'禁用'}</span></td>
       <td>
         ${v.has_web_page
@@ -533,15 +577,58 @@ async function loadLogs() {
   scrollLog();
 }
 
+let logPaused = false, logPending = 0;
+
 function appendLogLine(entry) {
+  const container = document.getElementById('logContainer');
+  if (logPaused) {
+    logPending++;
+    document.getElementById('logPause').textContent = `继续 (${logPending})`;
+    return;
+  }
   const div = document.createElement('div');
   div.className = 'log-line';
   div.setAttribute('data-color', entry.color||'');
+  div.dataset.search = ((entry.source||'') + ' ' + (entry.content||'')).toLowerCase();
   div.innerHTML = `<span class="log-time">${entry.time}</span>
     <span class="log-src">[${entry.source}]</span>
     <span class="log-msg">${escapeHtml(entry.content)}</span>`;
-  document.getElementById('logContainer').appendChild(div);
+  container.appendChild(div);
+  applyLogFilterTo(div);
+  while (container.children.length > 1000) container.removeChild(container.firstChild);
+  updateLogCount();
   scrollLog();
+}
+
+function updateLogCount(){
+  const el = document.getElementById('logCount');
+  if (!el) return;
+  const total = document.querySelectorAll('#logContainer .log-line').length;
+  el.textContent = total ? `（${total} 行）` : '';
+}
+
+function applyLogFilterTo(line) {
+  const q = (document.getElementById('logSearch').value || '').trim().toLowerCase();
+  const level = document.getElementById('logLevel').value;
+  const qOk = !q || (line.dataset.search || '').includes(q);
+  const lvOk = !level || line.getAttribute('data-color') === level;
+  line.style.display = (qOk && lvOk) ? '' : 'none';
+}
+
+function applyLogFilter() {
+  document.querySelectorAll('#logContainer .log-line').forEach(applyLogFilterTo);
+}
+
+function toggleLogPause() {
+  logPaused = !logPaused;
+  const btn = document.getElementById('logPause');
+  if (!logPaused) {
+    btn.textContent = '暂停';
+    logPending = 0;
+    loadLogs();
+  } else {
+    btn.textContent = '继续 (0)';
+  }
 }
 
 function scrollLog() {
@@ -554,6 +641,7 @@ function scrollLog() {
 async function clearLogs() {
   await fetch('/api/logs/clear', {method:'POST'});
   document.getElementById('logContainer').innerHTML = '';
+  updateLogCount();
 }
 
 function escapeHtml(s) {

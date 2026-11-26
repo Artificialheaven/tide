@@ -257,7 +257,35 @@ DEFAULTS = {
     "qq_file_max_kb": 20480,             # qq_download_file 单文件下载上限（KiB）
 
     # 权限
-    "risky_owner_only": True,            # 写删文件/MCP 远程桌面等风险操作只听主人
+    "risky_owner_only": True,            # 旧版二值门禁（permissions 为空时生效）
+    # AI 自主执行：风险工具不再要求"主人本人在场指令"。开启后群成员也能驱动
+    # 工作区读写、代码运行、空间发布等高风险操作（显式 deny/ask 规则仍优先）。
+    # 默认关；可按群覆盖。注意群消息可被提示词注入，开启前确认群是可信的。
+    "privileged_tools_on": False,
+    # agent 增强（docs/agent-framework-enhancement-plan-2026-11-25.md）
+    "tool_parallel_enabled": True,        # 同轮只读工具并发（关闭=旧串行行为）
+    "tool_parallel_max": 4,
+    "tool_parallel_group_timeout": 35,
+    "tool_parallel_serial": [],           # 追加串行的工具 key
+    "permissions": {
+        "owner_action": "allow",
+        "admin_action": "deny",
+        "member_action": "deny",
+        "default_action": "deny",
+        "ask": {"enabled": False, "timeout_sec": 120, "fallback": "deny"},
+        "rules": [],
+    },
+    "hooks_enabled": True,
+    "daily_token_budget_per_group": 0,    # 0=不限制
+    "approval_notify_group": True,
+    "subagent_enabled": True,
+    "subagent_max_rounds": 8,
+    "subagent_timeout_sec": 120,
+    # 额外授权给子代理（只读身份）的工具，逗号分隔，支持通配：
+    # mcp__playwright__browser_snapshot, mcp__playwright__browser_*, custom__my_tool
+    # 留空 = 纯只读（默认）。MCP 浏览器工具与自定义工具能读写外部世界，
+    # 只应填主人确认过、愿意让子代理自主调用的工具。
+    "subagent_extra_tools": "",
 
     # public 公共素材/技能库（跨群共享，写删仍走主人风险门禁）
     "public_writable_on": True,          # public/ 是否允许写入（关闭=只读）
@@ -273,6 +301,38 @@ DEFAULTS = {
     "meme_guide_on": True,               # 总开关（每群可覆盖）；关后不注入、工具摘除
     "meme_inject_max": 2,                # 单轮自动注入梗条数上限（多候选歧义时）
     "meme_entry_max_chars": 600,         # 单条梗释义注入字符上限
+
+    # QQ 空间（NapCat 私有扩展：上游没有任何空间事件，能做的只有主动轮询）
+    # 通道：优先复用机器人已有的 OneBot WebSocket，HTTP 仅兜底；是否可用由
+    # qzone.refresh() 探测（get_qzone_msg_list 能否调通），结果缓存 ttl 秒。
+    "qzone_probe_ttl": 600,               # 通道探测结果缓存（秒）
+    "qzone_image_max_kb": 10240,          # qzone_images 单张下载上限（KiB）
+    "qzone_watch_on": True,               # 空间知会轮询总开关（official 通道自动不可用）
+    "qzone_watch_interval": 300,          # 轮询间隔（秒，最小按 30s 生效）
+    "qzone_watch_feeds": True,            # 扫好友动态找"@了我"的说说
+    "qzone_watch_feeds_count": 10,        # 每次拉多少条好友动态
+    "qzone_watch_comments": True,         # 扫自己最近说说的新评论/回复
+    "qzone_watch_posts": 10,              # 每次看自己最近几条说说的评论
+    "qzone_notify_group": "",             # 知会投递到哪个群（空=发主人私聊）
+    # NapCat 扩展通知（戳一戳/资料赞/群名变更/表情回应/离线…）的策略开关
+    "notice_ext_on": True,                # 扩展通知总开关（关闭=全部静默）
+    "poke_back_on": True,                 # 被戳一戳时自动回戳
+    "poke_ai_on": False,                  # 戳一戳也触发一轮对话（默认关，防刷 token）
+    "group_name_sync_on": True,           # 群名变更时同步本地群名
+    # 断线/重启后是否用 get_group_msg_history 补本地群语料（不触发回复）
+    "history_backfill_on": True,
+    # 空间知会轮是否允许发/删说说（默认只让模型读取、评论、点赞；
+    # 打开后陌生人一次 @ 就能驱动主人权限发一条说说，慎开）
+    "qzone_event_write_on": False,
+    # 性能：mood 判定不必每轮跑（每次都是一次独立 LLM 调用）；
+    # 0/1 = 每轮，N = 每 N 轮一次（第 N 轮命中），建议 3。
+    "mood_every_rounds": 3,
+    # 保留策略（性能审计 P1-1）：messages/usage_log/qzone_events 只增不删
+    "housekeep_on": True,                 # 每日维护总开关
+    "housekeep_interval": 21600,          # 维护间隔（秒，默认 6 小时）
+    "messages_keep": 2000,                # 每群保留最近多少条消息（只删已摘要的旧行）
+    "usage_keep_days": 180,               # usage_log 保留天数
+    "qzone_events_keep_days": 30,         # 空间事件保留天数
 }
 
 # 群 settings_json 允许覆盖的键白名单
@@ -295,7 +355,7 @@ GROUP_OVERRIDABLE = frozenset({
     "screen_on", "self_memory_trace_on",
     "loop_on", "loop_every_rounds",
     "meme_guide_on", "read_video_on",
-    "at_only_on", "quote_reply_on",
+    "at_only_on", "quote_reply_on", "privileged_tools_on",
 })
 
 BUILTIN_PERSONA = "你是一个QQ群聊助手，说话简短自然，用中文交流。"
@@ -349,6 +409,10 @@ _INT_KEYS = {
     "loop_every_rounds", "loop_compact_threshold_chars",
     "loop_context_limit_tokens", "loop_compact_percent",
     "loop_keep_rounds", "loop_idle_turn_limit",
+    "qzone_probe_ttl", "qzone_image_max_kb", "qzone_watch_interval",
+    "qzone_watch_feeds_count", "qzone_watch_posts",
+    "mood_every_rounds", "housekeep_interval", "messages_keep",
+    "usage_keep_days", "qzone_events_keep_days",
 }
 _BOOL_KEYS = {
     "enable_thinking", "cheap_thinking_on", "heuristic_on", "judge_on",
@@ -357,12 +421,15 @@ _BOOL_KEYS = {
     "reminder_on", "scheduler_on", "vision_on", "file_parse_on",
     "voice_asr_on", "inbound_video_on",
     "vision_grid_on", "doc_render_on", "private_on",
-    "risky_owner_only", "public_writable_on", "inject_on",
+    "risky_owner_only", "privileged_tools_on", "public_writable_on", "inject_on",
     "meme_guide_on", "read_video_on", "read_video_asr_on",
     "join_greet_on", "wake_on", "interrupt_on", "trigger_on", "live_on",
     "ambient_context_on", "mood_on", "self_memory_on", "speakup_on",
     "screen_on", "self_memory_trace_on", "request_notify_on",
     "loop_on", "at_only_on", "quote_reply_on",
+    "qzone_watch_on", "qzone_watch_feeds", "qzone_watch_comments",
+    "notice_ext_on", "poke_back_on", "poke_ai_on", "group_name_sync_on", "history_backfill_on",
+    "qzone_event_write_on", "housekeep_on",
 }
 # 枚举键 → 合法取值；非法值回退默认（全局）或上级值（群级）
 _ENUM_KEYS = {

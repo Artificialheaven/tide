@@ -1,0 +1,38 @@
+/* 大肥鱼 设计 token（WebUI 美化方案 2026-11-25） */
+:root{
+  --tds-bg:#0B1018;
+  --tds-bg-raise:#0F1722;
+  --tds-surface:#121A28;
+  --tds-surface-2:#17213621;
+  --tds-surface-hi:#1A2436;
+  --tds-line:#1E293B;
+  --tds-line-strong:#2B3A50;
+  --tds-text:#E9EFF8;
+  --tds-text-sub:#C3CEE0;
+  --tds-muted:#8494AB;
+  --tds-faint:#5B6B82;
+  --tds-accent:#45C4F5;
+  --tds-accent-hover:#63D0FA;
+  --tds-accent-ink:#04141F;
+  --tds-accent-soft:rgba(69,196,245,.12);
+  --tds-ok:#3FB950;
+  --tds-warn:#D29922;
+  --tds-bad:#F85149;
+  --tds-radius:10px;
+  --tds-radius-sm:8px;
+  --tds-sidebar:236px;
+  --tds-topbar:56px;
+  --tds-shadow:0 8px 28px rgba(0,0,0,.35);
+  --tds-font:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+  --tds-mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+/* 旧变量名别名：未迁移页面自动跟随新色板 */
+:root{
+  --bg:var(--tds-bg); --card:var(--tds-surface); --border:var(--tds-line);
+  --text:var(--tds-text); --muted:var(--tds-muted); --accent:var(--tds-accent);
+  --green:var(--tds-ok); --red:var(--tds-bad); --yellow:var(--tds-warn);
+  --purple:#A371F7; --orange:#DB6D28;
+}
+
+/* 键盘可达性：统一焦点环 */
+:focus-visible { outline: 2px solid var(--tds-accent); outline-offset: 2px; }

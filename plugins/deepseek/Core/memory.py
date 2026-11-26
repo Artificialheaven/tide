@@ -11,8 +11,9 @@ from __future__ import annotations
 import asyncio
 import math
 import re
+import threading
 import time
-from collections import Counter
+from collections import Counter, OrderedDict
 from difflib import SequenceMatcher
 
 from . import context as ctx_mod
@@ -20,6 +21,10 @@ from . import storage
 
 _CJK_RE = re.compile(r'[一-鿿]')
 _TOKEN_RE = re.compile(r'[a-z0-9]+')
+
+# 性能审计 P1-3：按 user_id 缓存的「记忆列表 + BM25 索引」必须有上限。
+# 单用户条目几十 KB，一个活跃群里被 @/查询过的人只增不删，长跑会持续上涨。
+MEMORY_CACHE_MAX_USERS = 256
 
 
 def tokenize(text: str) -> list[str]:
@@ -98,10 +103,15 @@ def _merge_one(db_path: str, user_id: str, text: str, tags: str,
 
 
 class MemoryManager:
-    def __init__(self, db_path: str, log=None):
+    def __init__(self, db_path: str, log=None,
+                 cache_max_users: int = MEMORY_CACHE_MAX_USERS):
         self.db_path = db_path
         self._log = log or (lambda msg: None)
-        self._cache: dict[str, tuple[list, BM25]] = {}
+        # user_id → (记忆列表, BM25 索引)，按最近访问排序（头部最久未用）
+        self._cache: OrderedDict[str, tuple[list, BM25]] = OrderedDict()
+        self._cache_max_users = max(1, int(cache_max_users))
+        # Web 面板/其它线程也会 invalidate，缓存状态变更统一加锁
+        self._cache_lock = threading.Lock()
         self._locks: dict[str, asyncio.Lock] = {}
         self._tasks: set = set()
         self.tasks = None       # TaskManager，插件装配后注入
@@ -115,21 +125,35 @@ class MemoryManager:
         return lk
 
     def invalidate(self, user_id=None):
-        if user_id is None:
-            self._cache.clear()
-        else:
-            self._cache.pop(str(user_id), None)
+        with self._cache_lock:
+            if user_id is None:
+                self._cache.clear()
+            else:
+                self._cache.pop(str(user_id), None)
 
     # ── 召回 ────────────────────────────────────────────────────
 
     def _index(self, user_id: str):
+        """取（或加载）用户的记忆 BM25 索引；LRU 超上限时淘汰最久未用者。"""
         user_id = str(user_id)
-        cached = self._cache.get(user_id)
-        if cached is not None:
-            return cached
+        with self._cache_lock:
+            cached = self._cache.get(user_id)
+            if cached is not None:
+                self._cache.move_to_end(user_id)
+                return cached
         entries = storage.list_active_memories(self.db_path, user_id)
         bm = BM25([tokenize(e['text']) for e in entries])
-        self._cache[user_id] = (entries, bm)
+        with self._cache_lock:
+            # 加载期间可能有别的线程/协程先写入：以已存在的为准
+            cached = self._cache.get(user_id)
+            if cached is not None:
+                self._cache.move_to_end(user_id)
+                return cached
+            self._cache[user_id] = (entries, bm)
+            self._cache.move_to_end(user_id)
+            while len(self._cache) > self._cache_max_users:
+                # 淘汰时元组随 popitem 一起释放，BM25 索引不再被引用
+                self._cache.popitem(last=False)
         return entries, bm
 
     def _rank(self, user_id: str, query: str, topk: int,

@@ -1,0 +1,10 @@
+{% macro kpi(label, value, tone='') -%}
+<div class="kpi {{ tone }}"><div class="kpi-label">{{ label }}</div><div class="kpi-value">{{ value }}</div></div>
+{%- endmacro %}
+{% macro btn(label, kind='primary', attrs='') -%}
+<button class="btn btn-{{ kind }}" {{ attrs }}>{{ label }}</button>
+{%- endmacro %}
+{% macro field(label, name, value='', type='text', hint='') -%}
+<label class="field"><span>{{ label }}</span>
+<input type="{{ type }}" name="{{ name }}" value="{{ value }}">{% if hint %}<small>{{ hint }}</small>{% endif %}</label>
+{%- endmacro %}

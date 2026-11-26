@@ -106,10 +106,15 @@ class TaskManager:
 
     # ── 开口时被动注入 ──────────────────────────────────────────
 
-    def open_block(self, group_id, user_ids, budget: int = 120,
-                   limit: int = 3) -> str:
-        """当事人有未结事项时给模型的提醒段；无内容返回 ''。"""
-        rows = storage.open_commitments_for(
+    async def open_block(self, group_id, user_ids, budget: int = 120,
+                         limit: int = 3) -> str:
+        """当事人有未结事项时给模型的提醒段；无内容返回 ''。
+
+        P0-1：open_commitments_for 是同步 DAL，本轮对话里每轮都调，
+        放线程池跑，避免阻塞事件循环（调用方需 await）。
+        """
+        rows = await asyncio.to_thread(
+            storage.open_commitments_for,
             self.db_path, group_id, user_ids, limit + 3)
         lines, used = [], 0
         now = time.time()
@@ -190,18 +195,41 @@ class TaskManager:
         rows = await asyncio.to_thread(storage.due_commitments, self.db_path, now)
         for r in rows:
             g = await asyncio.to_thread(storage.get_group, self.db_path, r['group_id'])
-            if not g or not g['enabled']:
+            if not g:
                 await asyncio.to_thread(storage.mark_reminded, self.db_path, r['id'])
                 continue
-            eff_cfg = {**plugin.cfg, **(g.get('settings') or {})}
+            settings = g.get('settings') or {}
+            chat_type = 'private' if settings.get('chat_type') == 'private' else 'group'
+            if not g['enabled']:
+                if chat_type == 'private':
+                    # 私聊会话被关闭：这条约定不再有投递通道，标记作废
+                    await asyncio.to_thread(storage.mark_reminded,
+                                             self.db_path, r['id'])
+                else:
+                    # 群被关闭：不标记（重新开启后还会提醒），但必须顺延到期
+                    # 时间——否则长期关闭的群每轮都占满 due_commitments 的
+                    # LIMIT 100 窗口，别的群的提醒排不进来（饥饿）。
+                    await asyncio.to_thread(storage.snooze_commitment,
+                                             self.db_path, r['id'], now + 3600)
+                continue
+            eff_cfg = {**plugin.cfg, **settings}
             if not eff_cfg.get('reminder_on', True):
-                continue  # 群级关闭：不标记，将来重新开启还会提醒
+                # 群级关闭：不标记（将来重开还会提醒），但必须顺延到期时间，
+                # 否则这些行会一直占住 due_commitments 的 LIMIT 100 窗口，
+                # 其它群的提醒永远进不了查询
+                await asyncio.to_thread(storage.snooze_commitment,
+                                         self.db_path, r['id'], now + 3600)
+                continue
             kind = '你之前提到的话题' if r['kind'] == 'topic' else '你有个约定到时间了'
-            text = (f'[CQ:at,qq={r["owner_id"]}] {kind}：{r["content"]}'
-                    + (f'（{r["due_text"]}）' if r['due_text'] else ''))
+            body = f'{kind}：{r["content"]}' + (
+                f'（{r["due_text"]}）' if r['due_text'] else '')
+            target = str(r['group_id'])
+            message_type = 'group' if chat_type == 'group' else 'private'
+            text = (f'[CQ:at,qq={r["owner_id"]}] {body}'
+                    if message_type == 'group' else body)
             try:
                 await plugin.bot.send_message(
-                    message=text, target_id=r['group_id'], message_type='group')
+                    message=text, target_id=target, message_type=message_type)
                 await asyncio.to_thread(storage.mark_reminded,
                                          self.db_path, r['id'])
             except Exception as ex:

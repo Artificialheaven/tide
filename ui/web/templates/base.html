@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}大肥鱼 · 控制台{% endblock %}</title>
+<link rel="stylesheet" href="/static/tds/tokens.css">
+<link rel="stylesheet" href="/static/tds/app.css">
+<link rel="stylesheet" href="/static/tds/pages.css">
+{% block head %}{% endblock %}
+</head>
+<body class="tds">
+<aside class="tds-side">
+  <div class="tds-brand"><span class="tds-logo">◈</span><span>大肥鱼</span></div>
+  {% include "partials/nav.html" %}
+  <div class="tds-side-foot">v{{ nav_version|default('') }}</div>
+</aside>
+<main class="tds-main">
+  <header class="tds-top">
+    <h1>{% block page_title %}控制台{% endblock %}</h1>
+    <div class="tds-top-actions">{% block actions %}{% endblock %}</div>
+  </header>
+  <section class="tds-content">{% block content %}{% endblock %}</section>
+</main>
+{% block scripts %}{% endblock %}
+</body>
+</html>

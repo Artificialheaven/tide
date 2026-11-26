@@ -25,11 +25,28 @@ def _retrieve(task: asyncio.Task) -> None:
             pass
 
 
+def _is_self_cancelling() -> bool:
+    """当前任务是否正在被取消（Python 3.11+ 用 Task.cancelling() 精确判断）。
+
+    3.8~3.10 没有 cancelling()，退回 False 保持原语义；3.14 下返回 True 时
+    调用方必须把 CancelledError 继续往上抛，不能把关停信号吞进有界等待里。
+    """
+    current = asyncio.current_task()
+    if current is None:
+        return False
+    cancelling = getattr(current, 'cancelling', None)
+    if cancelling is None:
+        return False
+    return cancelling() > 0
+
+
 async def wait_task_resilient(task: asyncio.Task, timeout: float) -> bool:
     """有界等待一个已存在的 task，返回 True=已结束，False=超时残留。
 
-    ``wait_for(shield(task))`` 保证不向被等待 task 转发取消；外层任务收到
-    CancelledError 时吞掉不重抛，继续等到 deadline。
+    ``wait_for(shield(task))`` 保证不向被等待 task 转发取消。
+    取消语义（审计 P1-7）：
+    - 被等待的内部 task 失败/被取消：照原语义返回（不向调用方抛）；
+    - **本任务自身被 cancel**：重新抛出 CancelledError，不再吞掉关停信号。
     """
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
@@ -42,8 +59,10 @@ async def wait_task_resilient(task: asyncio.Task, timeout: float) -> bool:
         except asyncio.TimeoutError:
             return False
         except asyncio.CancelledError:
-            # 被等待 task 自身被我方 cancel（done → 退出）；
-            # 外层任务被外部 cancel（未 done → 吞掉继续有界等待）
+            # 先区分取消来源：自身被 cancel → 必须重抛（关停信号不能吞）；
+            # 内部 task 被我方 cancel（task.done()）→ 按原语义退出。
+            if _is_self_cancelling():
+                raise
             if task.done():
                 break
             continue
@@ -55,7 +74,10 @@ async def wait_task_resilient(task: asyncio.Task, timeout: float) -> bool:
 
 
 async def wait_resilient(coro, timeout: float) -> tuple[bool, asyncio.Task]:
-    """自行 ensure_future 后有界等待，返回 (是否结束, task)。"""
+    """自行 ensure_future 后有界等待，返回 (是否结束, task)。
+
+    本任务自身被 cancel 时 CancelledError 会向上抛；超时残余计入 _PENDING。
+    """
     task = asyncio.ensure_future(coro)
     ok = await wait_task_resilient(task, timeout)
     if not ok:
@@ -65,7 +87,11 @@ async def wait_resilient(coro, timeout: float) -> tuple[bool, asyncio.Task]:
 
 
 async def cancel_task(task: asyncio.Task | None, timeout: float = 3.0) -> None:
-    """cancel + 有界等待；None/已结束直接返回，任何异常都不冒泡。"""
+    """cancel + 有界等待；None/已结束直接返回，目标 task 的异常/取消不冒泡。
+
+    注意：**本任务自身被取消时** CancelledError 会由 wait_task_resilient
+    重新抛出，不再吞掉关停信号（审计 P1-7）。
+    """
     if task is None:
         return
     if task.done():

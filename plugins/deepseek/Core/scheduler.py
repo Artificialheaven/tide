@@ -127,6 +127,9 @@ class JobManager:
         self.db_path = db_path
         self._log = log or (lambda msg: None)
         self._task: asyncio.Task | None = None
+        # 任务 id → 连续失败次数：触发异常时指数/线性顺延，超上限停用，
+        # 避免被踢出群/解散群后每 5 分钟一次 LLM 调用无限重试烧 token
+        self._job_fails: dict[int, int] = {}
 
     # ── 模型工具入口 ────────────────────────────────────────────
 
@@ -224,11 +227,23 @@ class JobManager:
         for job in rows:
             try:
                 await self._fire(plugin, job)
+                self._job_fails.pop(job['id'], None)
             except Exception as ex:
                 self._log(f'定时任务 {job["id"]} 触发失败: {ex}')
-                await asyncio.to_thread(
-                    storage.job_mark_run, self.db_path, job['id'],
-                    time.time() + 300, True, f'触发失败: {ex}')
+                fails = self._job_fails.get(job['id'], 0) + 1
+                self._job_fails[job['id']] = fails
+                if fails >= 12:
+                    # 连续 12 次（约 1 小时）都失败：停用并留下最后一次错误，
+                    # 等人工 /ai 修正目标群/任务后再启用
+                    await asyncio.to_thread(
+                        storage.job_mark_run, self.db_path, job['id'],
+                        None, False, f'连续失败 {fails} 次，已自动停用: {ex}')
+                    self._log(f'定时任务 {job["id"]} 连续失败 {fails} 次，'
+                              '已自动停用')
+                else:
+                    await asyncio.to_thread(
+                        storage.job_mark_run, self.db_path, job['id'],
+                        time.time() + 300, True, f'触发失败: {ex}')
 
     async def _fire(self, plugin, job: dict):
         jid = job['id']

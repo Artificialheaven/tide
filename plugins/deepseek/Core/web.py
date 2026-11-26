@@ -29,6 +29,33 @@ def _plugin():
     return pm.plugins.get('deepseek') if pm is not None else None
 
 
+def _qzone_info(plugin) -> dict:
+    """QQ 空间通道状态：official 通道/老版 NapCat 下这里会明确告诉你为什么不可用。"""
+    from . import runtime_env
+    info = {'transport': runtime_env.transport(), 'available': False,
+            'text': '未加载', 'channel': '', 'version': '', 'why': ''}
+    qz = getattr(plugin, 'qzone', None) if plugin is not None else None
+    if qz is None:
+        return info
+    cap = getattr(qz, 'cap', None)
+    try:
+        available = qz.available()
+    except Exception:
+        available = False
+    try:
+        text = str(qz.status_text() or '')
+    except Exception:          # 插件热重载的中间态：宁可显示不可用也别 500
+        text = ''
+    info.update(
+        available=bool(available),
+        text=text,
+        channel=str(getattr(cap, 'channel', '') or ''),
+        version=str(getattr(cap, 'version', '') or ''),
+        why=str(getattr(cap, 'why', '') or ''),
+    )
+    return info
+
+
 def _eff_cfg(plugin, group_row):
     from .config import resolve_group
     return resolve_group(plugin.cfg, (group_row or {}).get('settings'))
@@ -41,7 +68,14 @@ def _run_async(coro, timeout: float = 30.0):
         return None, ('事件循环未运行', 503)
     try:
         fut = asyncio.run_coroutine_threadsafe(coro, loop)
-        return fut.result(timeout=timeout), None
+        try:
+            return fut.result(timeout=timeout), None
+        except TimeoutError:
+            # 超时后必须取消底层协程，否则它会继续跑（Web 重复点击会叠加）；
+            # 旧实现把超时当普通异常吞掉，只返回空错误消息。
+            if not fut.done():
+                fut.cancel()
+            return None, ('操作超时', 500)
     except Exception as e:
         return None, (str(e), 500)
 
@@ -105,6 +139,45 @@ def build_blueprint(plugin) -> flask.Blueprint:
     def runs_page():
         return flask.render_template('runs.html')
 
+    @bp.route('/approvals')
+    def approvals_page():
+        return flask.render_template('approvals.html')
+
+    @bp.route('/api/approvals', methods=['GET'])
+    def api_approvals():
+        rows = []
+        try:
+            rows = plugin.engine.approvals.pending()
+        except Exception:
+            pass
+        return flask.jsonify({
+            'ok': True,
+            'pending': [{k: r.get(k) for k in (
+                'id', 'gid', 'chat_type', 'actor_id', 'actor_name',
+                'tool_key', 'args_preview', 'status', 'created_at',
+                'expires_at')} for r in rows]})
+
+    @bp.route('/api/approvals/decide', methods=['POST'])
+    def api_approval_decide():
+        data = flask.request.get_json(silent=True) or {}
+        try:
+            aid = int(data.get('id'))
+        except (TypeError, ValueError):
+            return flask.jsonify({'ok': False, 'error': 'id 无效'}), 400
+        approved = bool(data.get('approved'))
+        if plugin is None:
+            return flask.jsonify({'ok': False, 'error': '插件未加载'}), 503
+        # decide 是 async 且 approved/decided_by 为 keyword-only：
+        # Flask 视图跑在 Werkzeug 线程里，必须桥回主事件循环等待结果，
+        # 否则拿到的是未执行的 coroutine。
+        ok, err = _run_async(plugin.engine.approvals.decide(
+            aid, approved=approved, decided_by='web-admin'))
+        if err:
+            return flask.jsonify({'ok': False, 'error': err[0]}), err[1]
+        if not ok:
+            return flask.jsonify({'ok': False, 'error': '不存在或已处理'}), 404
+        return flask.jsonify({'ok': True})
+
     @bp.route('/prompts')
     def prompts_page():
         return flask.render_template('prompts.html')
@@ -114,7 +187,7 @@ def build_blueprint(plugin) -> flask.Blueprint:
     @bp.route('/api/runs', methods=['GET'])
     def api_runs():
         try:
-            limit = int(flask.request.args.get('limit', 50))
+            limit = max(1, min(int(flask.request.args.get('limit', 50)), 500))
         except (TypeError, ValueError):
             limit = 50
         target = (flask.request.args.get('target') or '').strip()
@@ -195,7 +268,7 @@ def build_blueprint(plugin) -> flask.Blueprint:
         if p is None:
             return flask.jsonify({'ok': False, 'error': '插件未加载'}), 503
         token = secrets.token_hex(16)
-        raw = p.get_config()
+        raw = dict(getattr(p, '_raw_config', None) or p.get_config())
         raw['trigger_token'] = token
         p.reload_cfg(raw)              # 触发服务每请求实时读 cfg，无需重启
         return flask.jsonify({'ok': True, 'token': token})
@@ -300,7 +373,10 @@ def build_blueprint(plugin) -> flask.Blueprint:
 
     @bp.route('/api/live/rooms/<room_id>/stop', methods=['POST'])
     def api_live_stop(room_id):
-        force = bool((flask.request.get_json(silent=True) or {}).get('force'))
+        raw = flask.request.get_json(silent=True) or {}
+        _f = raw.get('force')
+        force = (_f.strip().lower() in ('1', 'true', 'yes', 'on')
+                 if isinstance(_f, str) else bool(_f))
         mgr = _live_mgr()
         if force:
             killed = mgr.force_stop(room_id)
@@ -319,7 +395,7 @@ def build_blueprint(plugin) -> flask.Blueprint:
     def api_live_sessions():
         room = flask.request.args.get('room', '')
         try:
-            limit = min(100, int(flask.request.args.get('limit', 30)))
+            limit = max(1, min(100, int(flask.request.args.get('limit', 30))))
         except ValueError:
             limit = 30
         rows = storage.list_live_sessions(db(), room_id=room, limit=limit)
@@ -371,10 +447,15 @@ def build_blueprint(plugin) -> flask.Blueprint:
         force = flask.request.args.get('force') in ('1', 'true')
         coro = bili_auth.validate(force=force)
         res, err = _run_async(coro, timeout=15)
+        snap = bili_auth.credential_snapshot()
+        if snap.get('missing_dependency'):
+            return flask.jsonify(
+                {'ok': False, 'error': f"缺少依赖：{snap['missing_dependency']}"
+                                       f"（{snap.get('hint', '')}）"}), 503
         if err:
             # 触网校验失败时退化为文件级状态，页面仍可用
             return flask.jsonify(
-                {'ok': True, 'info': bili_auth.credential_snapshot(),
+                {'ok': True, 'info': snap,
                  'check_error': err[0]})
         return flask.jsonify({'ok': True, 'info': res})
 
@@ -392,6 +473,11 @@ def build_blueprint(plugin) -> flask.Blueprint:
         except ImportError as e:
             return flask.jsonify(
                 {'ok': False, 'error': f'缺少依赖：{e}（pip install '
+                                       'bilibili-api-python aiohttp qrcode）'}), 503
+        if err and ('No module named' in str(err[0])
+                    or 'ImportError' in str(err[0])):
+            return flask.jsonify(
+                {'ok': False, 'error': f'缺少依赖：{err[0]}（pip install '
                                        'bilibili-api-python aiohttp qrcode）'}), 503
         if err:
             return flask.jsonify({'ok': False, 'error': err[0]}), err[1]
@@ -491,9 +577,75 @@ def build_blueprint(plugin) -> flask.Blueprint:
     @bp.route('/api/groups', methods=['GET'])
     def api_groups():
         groups = storage.list_groups(db())
+        # 一次连接内批量聚合（原实现每群一次 connect + 聚合，100 群约 330ms）
+        usage = storage.usage_summary_many(
+            db(), [g['group_id'] for g in groups], limit_rows=200)
         for g in groups:
-            g['usage'] = storage.usage_summary(db(), g['group_id'], limit_rows=200)
+            g['usage'] = usage.get(str(g['group_id']), {
+                'calls': 0, 'tokens_in': 0, 'cache_hit': 0,
+                'tokens_out': 0, 'by_kind': {}})
         return flask.jsonify({'ok': True, 'groups': groups})
+
+    @bp.route('/api/reconnect', methods=['POST'])
+    def api_reconnect():
+        """U-20：主动断开当前 WS，交给主循环自动重连（不需要重启进程）。"""
+        try:
+            from core import globals
+            ws = getattr(globals, 'websocket', None)
+            if ws is None:
+                return flask.jsonify({'ok': False, 'error': '当前未连接'}), 409
+            res, err = _run_async(ws.close(), timeout=5)
+            if err:
+                return flask.jsonify({'ok': False, 'error': err[0]}), err[1]
+            return flask.jsonify({'ok': True, 'message': '已断开，主循环将自动重连'})
+        except Exception as e:
+            return flask.jsonify({'ok': False, 'error': str(e)}), 500
+
+    @bp.route('/api/llm-health', methods=['GET'])
+    def api_llm_health():
+        """U-18：六条模型路由的配置健康检查（不发请求、不花钱）。"""
+        p = _plugin()
+        cfg = getattr(p, 'cfg', None) or {}
+        providers = {str(x.get('id')): x for x in (cfg.get('llm_providers') or [])
+                     if isinstance(x, dict)}
+        items = []
+        from .config import ROUTE_KEYS, ROUTE_LABELS
+        for key in ROUTE_KEYS:
+            route = str(cfg.get(key) or '')
+            pid, _, mid = route.partition('/')
+            prov = providers.get(pid) or {}
+            has_key = bool(prov.get('api_key')) or (pid == 'default' and
+                                                    bool(cfg.get('api_key')))
+            items.append({
+                'key': key, 'label': ROUTE_LABELS.get(key, key),
+                'route': route, 'provider': pid, 'model': mid,
+                'has_provider': bool(prov), 'has_key': has_key,
+                'ok': bool(route and mid and (has_key or not providers)),
+            })
+        return flask.jsonify({'ok': True, 'items': items})
+
+    @bp.route('/api/overview', methods=['GET'])
+    def api_overview():
+        try:
+            payload = storage.overview_stats(db())
+            payload['qzone'] = _qzone_info(_plugin())
+            return flask.jsonify({'ok': True, **payload})
+        except Exception as e:
+            return flask.jsonify({'ok': False, 'error': str(e)}), 500
+
+    @bp.route('/api/qzone/probe', methods=['POST'])
+    def api_qzone_probe():
+        """重新探测空间通道（换 NapCat 版本/刚配好 HTTP 兜底后点一下）。"""
+        plugin = _plugin()
+        if plugin is None:
+            return flask.jsonify({'ok': False, 'error': '插件未加载'}), 503
+        qz = getattr(plugin, 'qzone', None)
+        if qz is None:
+            return flask.jsonify({'ok': False, 'error': '空间客户端未初始化'}), 503
+        res, err = _run_async(qz.refresh(force=True), timeout=30)
+        if err:
+            return flask.jsonify({'ok': False, 'error': err[0]}), err[1]
+        return flask.jsonify({'ok': True, 'qzone': _qzone_info(plugin)})
 
     @bp.route('/api/groups/<gid>', methods=['GET'])
     def api_get_group(gid):
@@ -534,7 +686,7 @@ def build_blueprint(plugin) -> flask.Blueprint:
         if p is None:
             return flask.jsonify({'ok': False, 'error': '插件未加载'}), 503
         coro = p.memory.force_extract(gid, p.cfg, p.llm)
-        _, err = _run_async(coroutine, timeout=90)
+        _, err = _run_async(coro, timeout=90)
         if err:
             return flask.jsonify({'ok': False, 'error': err[0]}), err[1]
         return flask.jsonify({'ok': True})
@@ -756,12 +908,26 @@ def build_blueprint(plugin) -> flask.Blueprint:
     @bp.route('/api/memories/<int:mid>', methods=['PUT', 'DELETE'])
     def api_memory_item(mid):
         if flask.request.method == 'DELETE':
+            row = storage.get_memory(db(), mid)
             ok = storage.delete_memory(db(), mid)
+            if ok and row and row.get('user_id'):
+                p = _plugin()
+                if p:
+                    p.memory.invalidate(row['user_id'])
             return flask.jsonify({'ok': ok})
         d = flask.request.get_json(silent=True) or {}
+        imp = d.get('importance')
+        if imp is not None:
+            try:
+                imp = max(0.0, min(1.0, float(imp)))
+            except (TypeError, ValueError):
+                return flask.jsonify({'ok': False, 'error': 'importance 必须是数字'}), 400
+        tags = d.get('tags')
+        if tags is not None and not isinstance(tags, str):
+            return flask.jsonify({'ok': False, 'error': 'tags 必须是字符串'}), 400
         storage.update_memory(
-            db(), mid, text=d.get('text'), tags=d.get('tags'),
-            importance=d.get('importance'), superseded=d.get('superseded'))
+            db(), mid, text=d.get('text'), tags=tags,
+            importance=imp, superseded=d.get('superseded'))
         p = _plugin()
         if p:
             p.memory.invalidate()

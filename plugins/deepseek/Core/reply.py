@@ -87,11 +87,24 @@ def _split_sentences(s: str) -> list[str]:
     if not s:
         return []
     cq_spans = [m.span() for m in _CQ_RE.finditer(s)]
+    # P2-4：CQ 区间按起点有序，用游标推进代替「每个字符扫全部区间」；
+    # 游标只跳过已结束的区间，再顺着起点 <= i 的区间判断包含关系，
+    # 因此相邻/重叠区间下与原 any() 行为等价。
+    span_idx = 0
+    span_n = len(cq_spans)
     out, start = [], 0
     i = 0
     while i < len(s):
         ch = s[i]
-        in_cq = any(a <= i < b for a, b in cq_spans)
+        while span_idx < span_n and cq_spans[span_idx][1] <= i:
+            span_idx += 1
+        in_cq = False
+        k = span_idx
+        while k < span_n and cq_spans[k][0] <= i:
+            if i < cq_spans[k][1]:
+                in_cq = True
+                break
+            k += 1
         if not in_cq and ch in _SENT_END:
             # 吞掉连续标点（！？…）与收尾引号/括号
             j = i + 1
@@ -144,6 +157,13 @@ def split_reply(text: str, max_len: int = 100, min_len: int = 6) -> list[str]:
     text = (text or '').strip()
     if not text:
         return []
+    # 配置可能被写成 0/负数（Web 面板、手工改 config.json），
+    # 不夹一下会让 _hard_split 的 cut=0 原地打转
+    try:
+        max_len = max(1, int(max_len))
+        min_len = max(0, int(min_len))
+    except (TypeError, ValueError):
+        max_len, min_len = 100, 6
 
     # 1) 拆成 普通文本块 / 代码块（代码块原子）
     blocks: list[tuple[str, bool]] = []
@@ -249,6 +269,7 @@ async def send_in_chunks(bot, target_id, text: str, cfg: dict,
                          rng=None, message_type: str = 'group',
                          name_map: dict | None = None,
                          quote_id: str = '',
+                         quote_state: dict | None = None,
                          pctx=None) -> int:
     """按配置分条发送，返回实际发出的条数。群消息全程应在群锁内调用。
 
@@ -277,6 +298,9 @@ async def send_in_chunks(bot, target_id, text: str, cfg: dict,
         chunks = [text.strip()]
     if not chunks:
         return 0
+    # 引用名额只在真的会发出去时消耗：plan_text 名额耗尽返回空时上面已 return
+    if quote_state is not None and not quote_id:
+        quote_id = take_quote(quote_state)
     # official 关池：自然切条超出本轮剩余名额时，按余量均分重切
     if pctx is not None:
         chunks = pctx.plan_text(text, chunks)

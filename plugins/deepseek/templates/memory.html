@@ -1,33 +1,7 @@
-<!doctype html>
-<html lang="zh-CN">
-<head>
-<meta charset="utf-8">
-<title>DeepSeek 群AI · 群友记忆</title>
-<style>
-body{background:#1a1d23;color:#d7dae0;font:14px/1.6 "Microsoft YaHei",sans-serif;margin:0}
-nav{background:#22262e;padding:10px 20px;border-bottom:1px solid #333}
-nav a{color:#7aa2f7;margin-right:16px;text-decoration:none}
-.wrap{padding:20px;max-width:960px;margin:auto}
-input{background:#22262e;color:#eceff4;border:1px solid #3b4252;border-radius:4px;padding:6px 8px}
-button{background:#3b4252;color:#eceff4;border:0;border-radius:4px;padding:5px 12px;cursor:pointer;margin-right:6px}
-button.danger{background:#7e3b3b}
-table{border-collapse:collapse;width:100%;background:#22262e}
-th,td{padding:8px 10px;border-bottom:1px solid #2e333c;text-align:left;font-size:13px;vertical-align:top}
-textarea{width:100%;background:#1a1d23;color:#d7dae0;border:1px solid #3b4252;border-radius:4px;box-sizing:border-box}
-.hint{color:#6b7280;font-size:12px}.sup{color:#e06c75}
-</style>
-</head>
-<body>
-<nav>
-  <a href="/deepseek/dashboard?v={{ PLUGIN_VERSION }}">群开关</a>
-  <a href="/deepseek/settings?v={{ PLUGIN_VERSION }}">全局设置</a>
-  <a href="/deepseek/mcp?v={{ PLUGIN_VERSION }}">MCP 工具</a>
-  <a href="/deepseek/memory?v={{ PLUGIN_VERSION }}">群友记忆</a>
-  <a href="/deepseek/runs?v={{ PLUGIN_VERSION }}">后台/轮询</a>
-  <a href="/deepseek/prompts?v={{ PLUGIN_VERSION }}">提示词</a>
-  <a href="/deepseek/live?v={{ PLUGIN_VERSION }}">B站直播</a>
-  <span class="hint" style="float:right">v{{ PLUGIN_VERSION }}</span>
-</nav>
+{% extends "base.html" %}
+{% block title %}群友记忆 · 大肥鱼{% endblock %}
+{% block page_title %}群友记忆{% endblock %}
+{% block content %}
 <div class="wrap">
 <h2>群友长期记忆 <span id="stats" class="hint"></span></h2>
 <p><input id="q" placeholder="QQ号 / 昵称搜索" style="width:260px">
@@ -36,15 +10,19 @@ textarea{width:100%;background:#1a1d23;color:#d7dae0;border:1px solid #3b4252;bo
 <button class="danger" id="forgetAll" style="display:none" onclick="forgetAll()">软删除该用户全部记忆</button></p>
 <table><thead><tr><th style="width:40%">事实</th><th>标签</th><th>重要度</th><th>来源群</th><th>状态</th><th>操作</th></tr></thead>
 <tbody id="rows"></tbody></table>
+<div class="pager" id="pager-rows" style="margin:8px 0 16px"></div>
 
 <h2 style="margin-top:32px">她的自我记忆 <span class="hint">全局一份，跨所有群/私聊共享（「我」的经历、答应过的事、关系进展）</span></h2>
 <p><button onclick="loadSelf()">刷新</button>
-<label style="font-size:12px;color:#6b7280"><input type="checkbox" id="selfAll" onchange="loadSelf()"> 显示已作废</label>
+<label class="hint"><input type="checkbox" id="selfAll" onchange="loadSelf()"> 显示已作废</label>
 <span id="selfStats" class="hint"></span></p>
 <table><thead><tr><th style="width:46%">第一人称记忆</th><th>标签</th><th>重要度</th><th>来源群</th><th>状态</th><th>操作</th></tr></thead>
 <tbody id="selfRows"></tbody></table>
-</div>
+<div class="pager" id="pager-selfRows" style="margin:8px 0 16px"></div>
+{% endblock %}
+{% block scripts %}
 <script>
+
 let UID='';
 async function search(){
   const q=document.getElementById('q').value.trim();
@@ -138,7 +116,7 @@ async function toggleTrails(id,tr){
   if(next&&next.classList.contains('trail-row')){next.remove();return;}
   const r=await fetch(`/deepseek/api/self-memories/${id}/traces?limit=30`).then(r=>r.json());
   const panel=document.createElement('tr');panel.className='trail-row';
-  panel.innerHTML='<td colspan="6" style="background:#1a1d23"></td>';
+  panel.innerHTML='<td colspan="6"></td>';
   const box=panel.firstElementChild;
   const ts=(r.traces||[]);
   if(!ts.length){box.innerHTML='<span class="hint">还没有回忆链记录（开启 self_memory_trace_on 后，召回/改写会自动留痕）。</span>';}
@@ -148,7 +126,7 @@ async function toggleTrails(id,tr){
       const mood=t.mood_tag?` · 心情 ${esc(t.mood_tag)}${t.mood_level?'/'+t.mood_level:''}`:'';
       const score=t.kind==='recall'?` · 命中分 ${Number(t.match_score).toFixed(2)}`:'';
       const ctx=t.context?`<div class="hint">触发语：${esc(t.context)}</div>`:'';
-      const rev=t.revision?`<div class="hint" style="color:#d19a66">${esc(t.revision)}</div>`:'';
+      const rev=t.revision?`<div class="hint warn">${esc(t.revision)}</div>`:'';
       const who=document.createElement('div');
       who.style.cssText='border-left:2px solid #3b4252;padding:4px 8px;margin-bottom:6px';
       who.innerHTML=`<b>${fmtTime(t.created_at)}</b> ${TR_KIND[t.kind]||t.kind} · ${TR_SRC[t.source]||t.source||'—'}${t.group_id?' · 群 '+esc(t.group_id):''}${mood}${score}${ctx}${rev}`;
@@ -158,5 +136,32 @@ async function toggleTrails(id,tr){
   tr.after(panel);
 }
 loadSelf();
+
+// 分页：每页 20 行（U-33）
+const PAGE_SIZE = 20;
+function paged(tbId) {
+  const tb = document.getElementById(tbId);
+  const pager = document.getElementById('pager-' + tbId);
+  if (!tb || !pager) return;
+  const rows = Array.from(tb.querySelectorAll('tr')).filter(r => !r.querySelector('td[colspan]'));
+  if (rows.length <= PAGE_SIZE) { pager.innerHTML = ''; rows.forEach(r => r.style.display = ''); return; }
+  const pages = Math.ceil(rows.length / PAGE_SIZE);
+  let page = Math.min(pages, Math.max(1, Number(tb.dataset.page || 1)));
+  tb.dataset.page = page;
+  rows.forEach((r, i) => {
+    r.style.display = (i >= (page - 1) * PAGE_SIZE && i < page * PAGE_SIZE) ? '' : 'none';
+  });
+  pager.innerHTML = `<button class="plain" data-p="${page-1}" ${page<=1?'disabled':''}>上一页</button>
+    <span class="hint" style="margin:0 10px">第 ${page} / ${pages} 页（共 ${rows.length} 条）</span>
+    <button class="plain" data-p="${page+1}" ${page>=pages?'disabled':''}>下一页</button>`;
+  pager.querySelectorAll('button[data-p]').forEach(b => b.onclick = () => {
+    tb.dataset.page = Number(b.dataset.p); paged(tbId);
+  });
+}
+['rows', 'selfRows'].forEach(id => {
+  const el = document.getElementById(id);
+  if (el) new MutationObserver(() => paged(id)).observe(el, {childList: true});
+});
+
 </script>
-</body></html>
+{% endblock %}

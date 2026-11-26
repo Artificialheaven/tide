@@ -37,7 +37,14 @@ def call_api_sync(action: str, params: dict = None, timeout: float = 30.0,
         action, params if params is not None else {},
         plugin_name=plugin_name)
     future = asyncio.run_coroutine_threadsafe(coro, loop)
-    return future.result(timeout=timeout)
+    try:
+        return future.result(timeout=timeout)
+    except TimeoutError:
+        # 只等超时不取消的话，协程会在主循环里继续跑（重复点击会不断叠加）；
+        # run_coroutine_threadsafe 返回的 Future 支持跨线程 cancel。
+        if not future.done():
+            future.cancel()
+        raise
 
 
 def send_message_sync(message, target_id=None, message_type: str = 'private',
@@ -48,4 +55,11 @@ def send_message_sync(message, target_id=None, message_type: str = 'private',
         message, target_id=target_id, message_type=message_type,
         plugin_name=plugin_name)
     future = asyncio.run_coroutine_threadsafe(coro, loop)
-    return future.result(timeout=timeout)
+    try:
+        return future.result(timeout=timeout)
+    except TimeoutError:
+        # 只等超时不取消的话，协程会在主循环里继续跑（重复点击会不断叠加）；
+        # run_coroutine_threadsafe 返回的 Future 支持跨线程 cancel。
+        if not future.done():
+            future.cancel()
+        raise

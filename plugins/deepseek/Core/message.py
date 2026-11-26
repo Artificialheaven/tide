@@ -222,7 +222,7 @@ def _card_from_json(raw: str) -> str:
             continue
         key = path[-1]
         if any(sk in path[:-1] for sk in _TITLE_SKIP_PATHS):
-            pass
+            rank = 99
         elif key in _TITLE_BEST:
             rank = 0
         elif key in _TITLE_FALLBACK:

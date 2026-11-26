@@ -23,6 +23,8 @@ from .passive import PassivePool
 from .state import GroupCache, MemberCache, MessageIndex, MessageRecord
 
 MAX_TEXT_CHARS = 4000
+# 出站事件队列上限；官方通道消费端（bot 主循环）慢时不能无限堆积
+_QUEUE_MAX = 1000
 
 
 class SendExhausted(Exception):
@@ -85,7 +87,7 @@ class OfficialSession:
                                    config.passive_pool_size,
                                    pool_on=config.passive_pool_on)
 
-        self.out_queue: asyncio.Queue = asyncio.Queue()
+        self.out_queue: asyncio.Queue = asyncio.Queue(maxsize=_QUEUE_MAX)
         self._tasks: set[asyncio.Task] = set()
         self._enrich_inflight: set[tuple] = set()
         self._closed = False
@@ -127,7 +129,7 @@ class OfficialSession:
         except (TypeError, ValueError):
             return
         if not self._closed:
-            self.out_queue.put_nowait(payload)
+            self._enqueue(payload)
 
     # ── 缓存补全 ──────────────────────────────────────────
 
@@ -179,6 +181,24 @@ class OfficialSession:
 
     # ── 队列接口 ──────────────────────────────────────────
 
+    def _enqueue(self, payload: str) -> None:
+        """事件入队；队列满时丢弃最旧事件并告警，保证消费端拿到最新事件。"""
+        try:
+            self.out_queue.put_nowait(payload)
+            return
+        except asyncio.QueueFull:
+            pass
+        try:
+            self.out_queue.get_nowait()
+        except asyncio.QueueEmpty:
+            pass
+        else:
+            self._log(f"事件队列已满（{_QUEUE_MAX}），丢弃最旧事件")
+        try:
+            self.out_queue.put_nowait(payload)
+        except asyncio.QueueFull:
+            self._log(f"事件队列仍满（{_QUEUE_MAX}），丢弃新事件")
+
     async def recv(self) -> str:
         return await self.out_queue.get()
 
@@ -215,7 +235,7 @@ class OfficialSession:
         if echo not in (None, ""):
             envelope["echo"] = echo
         if not self._closed:
-            self.out_queue.put_nowait(self.api.compact_json(envelope))
+            self._enqueue(self.api.compact_json(envelope))
 
     async def dispatch_action(self, action: str, params: dict) -> dict:
         action = str(action or "")

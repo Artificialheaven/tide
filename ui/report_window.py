@@ -134,22 +134,24 @@ def fetch_and_update_data():
         if not cache_valid or not groups_cached:
             try:
                 if globals.bot_instance:
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
+                    _loop = globals.event_loop
+                    if _loop is None or not _loop.is_running():
+                        raise RuntimeError('主事件循环不可用')
                     try:
                         print("[报表窗口] 正在获取群列表...")
                         if dpg.does_item_exist("data_status"):
                             dpg.set_value("data_status", "⟳ 正在获取群列表...")
-                        result = loop.run_until_complete(
-                            globals.bot_instance.get_group_list(plugin_name="报表窗口")
-                        )
+                        result = asyncio.run_coroutine_threadsafe(
+                            globals.bot_instance.get_group_list(plugin_name="报表窗口"),
+                            _loop,
+                        ).result(timeout=30)
                         if result and 'data' in result:
                             group_list_cache = result['data']
                             print(f"[报表窗口] 获取到 {len(group_list_cache)} 个群")
                             # 保存数据到临时文件
                             save_report_data()
-                    finally:
-                        loop.close()
+                    except Exception as e:
+                        raise e
             except Exception as e:
                 print(f"[报表窗口] 获取群列表失败: {e}")
                 if dpg.does_item_exist("data_status"):
@@ -159,22 +161,24 @@ def fetch_and_update_data():
         if not cache_valid or not friends_cached:
             try:
                 if globals.bot_instance:
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
+                    _loop = globals.event_loop
+                    if _loop is None or not _loop.is_running():
+                        raise RuntimeError('主事件循环不可用')
                     try:
                         print("[报表窗口] 正在获取好友列表...")
                         if dpg.does_item_exist("data_status"):
                             dpg.set_value("data_status", "⟳ 正在获取好友列表...")
-                        result = loop.run_until_complete(
-                            globals.bot_instance.get_friend_list(plugin_name="报表窗口")
-                        )
+                        result = asyncio.run_coroutine_threadsafe(
+                            globals.bot_instance.get_friend_list(plugin_name="报表窗口"),
+                            _loop,
+                        ).result(timeout=30)
                         if result and 'data' in result:
                             friend_list_cache = result['data']
                             print(f"[报表窗口] 获取到 {len(friend_list_cache)} 个好友")
                             # 保存数据到临时文件
                             save_report_data()
-                    finally:
-                        loop.close()
+                    except Exception as e:
+                        raise e
             except Exception as e:
                 print(f"[报表窗口] 获取好友列表失败: {e}")
                 if dpg.does_item_exist("data_status"):

@@ -1,0 +1,166 @@
+/* 迁移后插件页共用样式（M2）：字段组 / 表单控件 / 表格 / 代码块 + 各页原本写在
+   <style> 里的组件类（保留原类名，避免大改 HTML 与内联 JS）。
+   全部限定在 .tds-content 内，框架面板页与旧页面（走 legacy.css）不受影响。 */
+
+/* ---------- 基础排版 ---------- */
+.tds-content .wrap { padding: 0; max-width: none; margin: 0; }
+.tds-content h2 { font-size: 16px; font-weight: 600; margin: 0 0 14px;
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.tds-content h3 { font-size: 15px; font-weight: 600; margin: 0 0 10px; }
+.tds-content h4 { font-size: 14px; font-weight: 600; margin: 0 0 4px; }
+.tds-content p { margin: 8px 0; }
+.tds-content a { color: var(--tds-accent); text-decoration: none; }
+.tds-content a:hover { color: var(--tds-accent-hover); }
+.tds-content strong, .tds-content b { font-weight: 600; }
+
+/* ---------- 字段组 ---------- */
+.tds-content fieldset { border: 1px solid var(--tds-line); border-radius: var(--tds-radius);
+  background: var(--tds-surface); margin: 0 0 16px; padding: 14px 18px; }
+.tds-content legend { padding: 0 8px; color: var(--tds-muted); font-size: 12px; letter-spacing: .04em; }
+.tds-content label { display: block; margin: 8px 0; color: var(--tds-text-sub); }
+/* 工具勾选：每项一行固定宽 */
+.tds-content .tool label { display: inline-flex; align-items: center; gap: 6px;
+  width: 280px; margin: 4px 0; vertical-align: top; }
+
+/* ---------- 表单控件 ---------- */
+.tds-content input, .tds-content select, .tds-content textarea {
+  font-family: var(--tds-font); font-size: 13px; color: var(--tds-text);
+  background: var(--tds-bg-raise); border: 1px solid var(--tds-line-strong);
+  border-radius: var(--tds-radius-sm); padding: 7px 10px; box-sizing: border-box; max-width: 100%; }
+.tds-content input:not([type=checkbox]):not([type=radio]), .tds-content select { width: 320px; }
+.tds-content textarea { width: 100%; height: 120px; line-height: 1.6; resize: vertical; }
+.tds-content input[type=checkbox], .tds-content input[type=radio] {
+  width: auto; margin: 0 6px 0 0; accent-color: var(--tds-accent); vertical-align: middle; }
+.tds-content input:focus, .tds-content select:focus, .tds-content textarea:focus {
+  border-color: var(--tds-accent); outline: none; box-shadow: 0 0 0 3px var(--tds-accent-soft); }
+.tds-content button:not(.btn) { background: var(--tds-accent); color: var(--tds-accent-ink);
+  border: 1px solid transparent; border-radius: var(--tds-radius-sm); padding: 7px 16px;
+  font-size: 13px; font-weight: 600; cursor: pointer; margin-right: 8px; }
+.tds-content button:not(.btn):hover { background: var(--tds-accent-hover); }
+.tds-content button:not(.btn):disabled { opacity: .45; cursor: default; }
+.tds-content button.danger { background: var(--tds-bad); color: #fff; }
+.tds-content button.ok { background: var(--tds-ok); color: #04180A; }
+.tds-content button.primary { background: var(--tds-accent); color: var(--tds-accent-ink); }
+.tds-content button.reset, .tds-content button.plain { background: transparent;
+  border-color: var(--tds-line-strong); color: var(--tds-text-sub); }
+.tds-content button.reset:hover, .tds-content button.plain:hover { background: var(--tds-surface-hi); }
+
+/* ---------- 表格 ---------- */
+.tds-content table { width: 100%; border-collapse: collapse; font-size: 13px;
+  background: var(--tds-surface); border: 1px solid var(--tds-line);
+  border-radius: var(--tds-radius); overflow: hidden; margin: 8px 0; }
+.tds-content th, .tds-content td { padding: 8px 10px; border-bottom: 1px solid var(--tds-line);
+  text-align: left; vertical-align: top; }
+.tds-content th { color: var(--tds-muted); font-weight: 600; font-size: 12px;
+  background: var(--tds-bg-raise); }
+.tds-content tr:last-child td { border-bottom: 0; }
+.tds-content tr.row { cursor: pointer; }
+.tds-content tr.row:hover td { background: rgba(69, 196, 245, .05); }
+.tds-content tr.sel td { background: var(--tds-accent-soft); }
+
+/* ---------- 代码块 ---------- */
+.tds-content pre { white-space: pre-wrap; word-break: break-word; background: var(--tds-bg-raise);
+  border: 1px solid var(--tds-line); border-radius: var(--tds-radius-sm); padding: 8px 10px;
+  margin: 6px 0; font-family: var(--tds-mono); font-size: 12.5px;
+  color: var(--tds-text-sub); overflow: auto; }
+.tds-content code { font-family: var(--tds-mono); font-size: 12px; background: var(--tds-bg-raise);
+  border-radius: 4px; padding: 1px 6px; color: var(--tds-text-sub); }
+.tds-content pre code { background: none; padding: 0; border: 0; }
+.tds-content pre.default { font-size: 12px; color: var(--tds-muted); max-height: 260px; }
+.tds-content pre.logs { height: 220px; margin-top: 10px; font: 12px/1.5 var(--tds-mono); }
+.tds-content details { margin-top: 6px; }
+.tds-content summary { cursor: pointer; color: var(--tds-accent); font-size: 12px; }
+.tds-content .step { border-left: 2px solid var(--tds-line-strong);
+  margin: 8px 0 8px 6px; padding: 4px 0 4px 14px; }
+.tds-content .step b { color: var(--tds-accent); }
+
+/* ---------- 提示与状态 ---------- */
+.tds-content .hint { color: var(--tds-muted); font-size: 12px; }
+.tds-content .err { color: var(--tds-bad); }
+.tds-content .warn { color: var(--tds-warn); }
+.tds-content .sup { color: var(--tds-bad); }
+.tds-content .status { font-size: 12px; color: var(--tds-muted); }
+.tds-content .status.ok { color: var(--tds-ok); }
+.tds-content .status.err { color: var(--tds-bad); }
+.tds-content .running { color: var(--tds-ok); }
+.tds-content .failed { color: var(--tds-bad); }
+.tds-content .stopped { color: var(--tds-muted); }
+.tds-content .stat { color: var(--tds-muted); font-size: 12px; margin-right: 14px; white-space: nowrap; }
+
+/* ---------- 工具栏 / 目录 / 行 ---------- */
+.tds-content .toolbar, .tds-content .tds-toolbar { display: flex; gap: 10px;
+  align-items: center; margin: 10px 0; flex-wrap: wrap; }
+.tds-content .toolbar input, .tds-content .tds-toolbar input { flex: 1; min-width: 160px; }
+.tds-content .tds-toc { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
+.tds-content .tds-toc a { font-size: 12px; padding: 4px 9px; border: 1px solid var(--tds-line);
+  border-radius: 999px; background: var(--tds-surface); color: var(--tds-muted);
+  text-decoration: none; white-space: nowrap; }
+.tds-content .tds-toc a:hover { color: var(--tds-accent); border-color: var(--tds-line-strong); }
+.tds-content .row { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-top: 8px; }
+.tds-content #topbar { display: flex; align-items: center; gap: 14px;
+  margin-bottom: 8px; flex-wrap: wrap; }
+.tds-content #detail { margin-top: 22px; border: 1px solid var(--tds-line);
+  border-radius: var(--tds-radius); padding: 14px 18px; background: var(--tds-surface); display: none; }
+
+/* ---------- 卡片 ---------- */
+.tds-content .card { background: var(--tds-surface); border: 1px solid var(--tds-line);
+  border-radius: var(--tds-radius); padding: 14px 18px; margin: 10px 0; }
+.tds-content .card.overridden { border-color: var(--tds-ok); }
+.tds-content .card h3, .tds-content .card h4 { margin: 0 0 8px; }
+.tds-content .card h4 .tag { font-weight: 400; font-size: 11px;
+  color: var(--tds-ok); background: none; margin-left: 8px; }
+.tds-content .tokens { margin: 6px 0; }
+.tds-content .tokens code { background: var(--tds-bg-raise); color: var(--tds-warn); margin-right: 6px; }
+
+/* ---------- 标签 / 徽标 ---------- */
+.tds-content .tag { display: inline-block; border-radius: 4px; padding: 0 6px;
+  font-size: 12px; background: var(--tds-surface-hi); color: var(--tds-text-sub); }
+.tds-content .tag.k-wake { background: var(--tds-surface-hi); color: var(--tds-text-sub); }
+.tds-content .tag.k-scheduler { background: rgba(63, 185, 80, .16); color: var(--tds-ok); }
+.tds-content .tag.k-trigger { background: rgba(163, 113, 247, .18); color: #C79BF7; }
+.tds-content .tag.k-speakup { background: rgba(210, 153, 34, .18); color: var(--tds-warn); }
+.tds-content .tag.st-ok, .tds-content .tag.st-on { background: rgba(63, 185, 80, .16); color: var(--tds-ok); }
+.tds-content .tag.st-silent, .tds-content .tag.st-noskip,
+.tds-content .tag.st-empty, .tds-content .tag.st-off {
+  background: rgba(210, 153, 34, .16); color: var(--tds-warn); }
+.tds-content .tag.st-error { background: rgba(248, 81, 73, .16); color: var(--tds-bad); }
+.tds-content .badge { display: inline-block; border-radius: 999px;
+  padding: 1px 10px; font-size: 12px; margin-left: 8px; }
+.tds-content .badge.b-run { background: rgba(63, 185, 80, .16); color: var(--tds-ok); }
+.tds-content .badge.b-stop { background: rgba(248, 81, 73, .16); color: var(--tds-bad); }
+.tds-content .badge.b-stale { background: rgba(210, 153, 34, .16); color: var(--tds-warn); }
+.tds-content .sess-body { background: var(--tds-bg-raise); border-radius: var(--tds-radius-sm);
+  padding: 10px; margin: 6px 0; white-space: pre-wrap; font-size: 13px;
+  max-height: 260px; overflow: auto; }
+
+/* ---------- 标签页 ---------- */
+.tds-content .tabs { display: flex; gap: 2px; margin: 0 0 14px;
+  border-bottom: 1px solid var(--tds-line); }
+.tds-content .tabs button:not(.btn) { background: transparent; color: var(--tds-muted);
+  border: 0; border-bottom: 2px solid transparent; border-radius: 0;
+  padding: 8px 16px; margin: 0; font-size: 14px; font-weight: 400; }
+.tds-content .tabs button:not(.btn):hover { background: transparent; color: var(--tds-text); }
+.tds-content .tabs button.on { color: var(--tds-text); border-bottom-color: var(--tds-accent); }
+.tds-content .panel { display: none; }
+.tds-content .panel.on { display: block; }
+
+/* ---------- 弹窗（B 站直播扫码） ---------- */
+.tds-content dialog { background: var(--tds-surface); color: var(--tds-text);
+  border: 1px solid var(--tds-line-strong); border-radius: var(--tds-radius);
+  padding: 22px; width: 340px; }
+.tds-content dialog::backdrop { background: rgba(0, 0, 0, .6); }
+.tds-content dialog img { display: block; margin: 10px auto; background: #fff;
+  padding: 8px; border-radius: 6px; width: 240px; height: 240px; }
+
+/* ---------- 移动端 ---------- */
+@media (max-width: 720px) {
+  .tds-content .wrap { padding: 0; }
+  .tds-content fieldset { padding: 12px 14px; }
+  .tds-content label { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
+  .tds-content label input[type=checkbox] { margin-top: 2px; }
+  .tds-content input:not([type=checkbox]):not([type=radio]),
+  .tds-content select, .tds-content textarea { width: 100% !important; }
+  .tds-content .tool label { width: 100%; }
+  .tds-content table { display: block; overflow-x: auto; }
+  .tds-content .toolbar, .tds-content .tds-toolbar, .tds-content .row { flex-wrap: wrap; }
+}

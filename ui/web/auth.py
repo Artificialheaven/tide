@@ -28,7 +28,8 @@ def try_login(password: str) -> bool:
     """验证密码"""
     pwd = (password or "").strip()
     token = (AUTH_TOKEN or "").strip()
-    if pwd == token and pwd != "":
+    # U-05：未配置密码时允许空口令登录（面板默认只监听本机），避免"永远登不进"
+    if pwd == token and (pwd != "" or token == ""):
         session["authenticated"] = True
         session.permanent = True
         return True

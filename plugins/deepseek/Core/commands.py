@@ -25,6 +25,9 @@ _VERB_ALIASES = {
     '风格': 'style', '学说话': 'style', 'style': 'style',
     '循环': 'loop', '长跑': 'loop', 'loop': 'loop',
     '帮助': 'help', 'help': 'help',
+    '批准': 'approve', '同意': 'approve', 'approve': 'approve',
+    '拒绝': 'reject', 'reject': 'reject',
+    '待审批': 'approvals', '审批': 'approvals', 'approvals': 'approvals',
 }
 
 _LOOP_STOP_WORDS = {'关', '关闭', '停', '停止', '停掉', '结束', 'stop', 'off', 'end'}

@@ -61,7 +61,20 @@ _NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
 # 进程内小 LRU：键 = 路径/size/mtime/窗口/扫描参数。不 hash 文件内容。
 _CACHE: 'OrderedDict[str, dict]' = OrderedDict()
 _CACHE_MAX = 6
+# 宫格图（sheet）约 1.8MB/张，只按张数限制会常驻十几 MB；再加总字节上限
+_CACHE_BYTES_MAX = 16 * 1024 * 1024
 _CACHE_LOCK = threading.Lock()
+_cache_bytes = 0
+
+
+def _entry_bytes(entry: dict) -> int:
+    """估算一条缓存的内存占用（宫格图字节数 + 其余字段的粗略开销）。"""
+    sheet = entry.get('sheet') or b''
+    try:
+        sheet_len = len(sheet)
+    except TypeError:
+        sheet_len = 0
+    return sheet_len + 2048
 
 
 class VideoError(Exception):
@@ -801,11 +814,20 @@ def _cached(key: str):
 
 
 def _store_cache(key: str, entry: dict) -> None:
+    global _cache_bytes
     with _CACHE_LOCK:
+        old = _CACHE.pop(key, None)
+        if old is not None:
+            _cache_bytes -= _entry_bytes(old)
         _CACHE[key] = entry
-        _CACHE.move_to_end(key)
-        while len(_CACHE) > _CACHE_MAX:
-            _CACHE.popitem(last=False)
+        _cache_bytes += _entry_bytes(entry)
+        # 张数与总字节双上限：至少保留最新一条，避免单张超大宫格把自己也淘汰掉
+        while ((len(_CACHE) > _CACHE_MAX or _cache_bytes > _CACHE_BYTES_MAX)
+               and len(_CACHE) > 1):
+            _, dropped = _CACHE.popitem(last=False)
+            _cache_bytes -= _entry_bytes(dropped)
+        if _cache_bytes < 0:
+            _cache_bytes = 0
 
 
 # ── 子代理 ──────────────────────────────────────────────────────

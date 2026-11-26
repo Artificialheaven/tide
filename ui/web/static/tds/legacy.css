@@ -1,0 +1,38 @@
+/* 旧页面过渡皮肤：不改结构，只统一色板/字体/控件观感 */
+html,body{background:var(--tds-bg)!important;color:var(--tds-text)!important;
+  font-family:var(--tds-font)!important;font-size:14px;line-height:1.6}
+a{color:var(--tds-accent)}
+nav{background:var(--tds-surface)!important;border-bottom:1px solid var(--tds-line)!important}
+nav a,nav button{color:var(--tds-accent)!important}
+header{background:var(--tds-surface)!important;border-bottom:1px solid var(--tds-line)!important}
+table,thead,tbody,tr,td,th{background:transparent!important;border-color:var(--tds-line)!important}
+table{background:var(--tds-surface)!important;border-radius:var(--tds-radius-sm)}
+th{color:var(--tds-muted)!important}
+fieldset{border-color:var(--tds-line)!important;border-radius:var(--tds-radius-sm)!important}
+legend{color:var(--tds-muted)!important}
+input,select,textarea,button{font-family:var(--tds-font)}
+input,select,textarea{background:var(--tds-bg-raise)!important;
+  border:1px solid var(--tds-line-strong)!important;color:var(--tds-text)!important;
+  border-radius:var(--tds-radius-sm)!important;padding:7px 10px}
+input:focus,select:focus,textarea:focus{border-color:var(--tds-accent)!important;outline:none;
+  box-shadow:0 0 0 3px var(--tds-accent-soft)}
+button{cursor:pointer;border-radius:var(--tds-radius-sm)}
+button:not(.plain){background:var(--tds-accent)!important;color:var(--tds-accent-ink)!important;
+  border:1px solid transparent!important;font-weight:600}
+button:not(.plain):hover{background:var(--tds-accent-hover)!important}
+button.danger,.btn-red{background:var(--tds-bad)!important;color:#fff!important}
+pre,code{font-family:var(--tds-mono);background:var(--tds-bg-raise)!important;
+  border-color:var(--tds-line)!important;color:var(--tds-text-sub)}
+::selection{background:rgba(69,196,245,.28)}
+::-webkit-scrollbar{width:10px;height:10px}
+::-webkit-scrollbar-thumb{background:var(--tds-line-strong);border-radius:6px}
+::-webkit-scrollbar-track{background:transparent}
+
+/* 移动端：表格横向滚动、工具栏换行、间距收紧 */
+@media (max-width: 720px) {
+  .wrap { padding: 14px 12px; }
+  table { display: block; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  nav { padding: 8px 12px; }
+  .toolbar, .tds-toolbar { flex-wrap: wrap; }
+  input[type="text"], input[type="search"], select { max-width: 100%; }
+}

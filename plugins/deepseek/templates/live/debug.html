@@ -63,6 +63,8 @@
   .round-n { color:#9aa7ff; font-weight:700; }
   .usage { color:#7a7a88; font-size:11px; font-family:monospace; }
 </style>
+<link rel="stylesheet" href="/static/tds/tokens.css">
+<link rel="stylesheet" href="/static/tds/legacy.css">
 </head>
 <body>
 <div id="bar">
@@ -80,6 +82,7 @@
   <label><input type="checkbox" id="autoscroll" checked> 自动滚动</label>
   <button id="pause">⏸ 暂停</button>
   <button id="clear">清屏</button>
+  <button id="older" title="加载更早的事件（进程内缓冲最近 1000 条，重启即清空）">⏮ 加载更早</button>
   <button id="export">导出 JSON</button>
   <span style="flex:1"></span>
   <label>显示：
@@ -111,8 +114,10 @@ const KIND_CN = { chat:'群消息', gate:'闸门', turn_start:'回合开始',
   prompt:'插队', model_round:'模型调用', tool_result:'工具结果',
   assistant_send:'实际发送', compact:'上下文压缩', notice:'长跑通知',
   turn_end:'回合结束', meta:'传输' };
+const EVENTS_MAX = 3000;  // state.events 上限（与 DOM 时间线上限保持一致）
 const state = { token: qs.get('token') || LS.get('token',''), es:null,
-  events: [], paused:false, pending:[], eventCount:0 };
+  events: [], paused:false, pending:[], eventCount:0,
+  minSeq:0, hasMore:true, loadingHist:false };
 
 // 当前生效的群：URL 参数优先（保存并刷新后由 URL 携带），其次 localStorage
 function curGroup(){ return qs.get('groups') || LS.get('groups','') || ''; }
@@ -140,7 +145,8 @@ function fillGroupSel(data){
   (data.groups || []).forEach(g => {
     const o = document.createElement('option');
     o.value = g.group_id;
-    o.textContent = g.group_id
+    o.textContent = (g.delivery ? '◆ 空间知会 · ' : '') + g.group_id
+      + (g.chat_type === 'private' ? '（私聊）' : '')
       + (g.enabled ? '' : '（未开启）')
       + (g.persona ? ' · ' + g.persona : '');
     sel.appendChild(o);
@@ -166,6 +172,9 @@ async function bootstrap(){
   if (res.auth) fillGroupSel(res.data);
   else $('#groupSel').innerHTML =
     '<option value="">全部群（状态接口不可达）</option>';
+  // 先把内存缓冲里的历史事件拉出来，再挂 SSE 接新事件：刷新页面不再一片
+  // 空白，能直接看到这次运行到目前为止发生过什么
+  await loadHistory(true);
   connect();
 }
 
@@ -174,6 +183,17 @@ function esc(s){ return String(s==null?'':s).replace(/[&<>]/g,
 function nowStr(ts){ const d=new Date(ts*1000);
   return d.toTimeString().slice(0,8); }
 
+// 事件数组与 DOM 一样有上限，只保留最新 EVENTS_MAX 条（导出与「加载更早」
+// 都读 state.events，不裁会随 SSE 无限增长）。裁剪最旧时必须把 minSeq
+// 同步到剩余最早的 seq——它同时是「加载更早」的游标，停在已被裁掉的 seq
+// 上会让中间一段永远翻不到。
+function trimEvents(){
+  if (state.events.length > EVENTS_MAX)
+    state.events = state.events.slice(-EVENTS_MAX);
+  const first = state.events.find(e => e.seq);
+  state.minSeq = first ? first.seq : 0;
+}
+
 function addEvent(ev){
   if (ev.kind === 'meta' && ev.hello) {
     const scope = (ev.groups && ev.groups.length) ? ev.groups.join(',') : '全部群';
@@ -181,7 +201,8 @@ function addEvent(ev){
     return;  // 问候帧只更新状态栏，不进时间线
   }
   state.events.push(ev);
-  if (state.events.length > 3000) state.events.shift();
+  if (ev.seq && (!state.minSeq || ev.seq < state.minSeq)) state.minSeq = ev.seq;
+  if (state.events.length > EVENTS_MAX) trimEvents();
   if (ev.kind !== 'meta') {
     state.eventCount++;
     $('#evtCount').textContent = '事件 ' + state.eventCount;
@@ -190,7 +211,7 @@ function addEvent(ev){
   render(ev);
 }
 
-function render(ev){
+function render(ev, prepend){
   const feed = $('#feed');
   const box = document.createElement('div');
   box.className = 'ev ' + ev.kind;
@@ -265,9 +286,14 @@ function render(ev){
       h += ' ' + esc(JSON.stringify(ev));
   }
   box.innerHTML = h;
-  feed.appendChild(box);
-  while (feed.childNodes.length > 1500) feed.removeChild(feed.firstChild);
-  if ($('#autoscroll').checked)
+  if (prepend) {
+    feed.insertBefore(box, feed.firstChild);
+    while (feed.childNodes.length > EVENTS_MAX) feed.removeChild(feed.lastChild);
+  } else {
+    feed.appendChild(box);
+    while (feed.childNodes.length > 1500) feed.removeChild(feed.firstChild);
+  }
+  if (!prepend && $('#autoscroll').checked)
     window.scrollTo(0, document.body.scrollHeight);
 }
 
@@ -314,6 +340,67 @@ function connect(){
     }).catch(() => {});
   };
 }
+
+// ── 历史事件加载（进程内 ring，最多 1000 条；进程重启即清空）──────
+function historyUrl(before){
+  const p = new URLSearchParams({ token: state.token, limit: '200',
+    before: String(before || 0) });
+  const g = curGroup().replace(/\s/g,'');
+  if (g) p.set('groups', g);
+  if (kindFilter) p.set('kinds', [...kindFilter].join(','));
+  return '/live/api/events?' + p.toString();
+}
+function setOlderBtn(){
+  const b = $('#older');
+  if (!b) return;
+  if (!state.hasMore) {
+    b.disabled = true; b.textContent = '⏮ 已到最早';
+    b.title = '本次运行的内存缓冲已到最早（重启前的记录不在内存里）';
+  } else {
+    b.disabled = !!state.loadingHist; b.textContent = '⏮ 加载更早';
+    b.title = '加载更早的事件（进程内缓冲最近 1000 条，重启即清空）';
+  }
+}
+async function loadHistory(initial){
+  if (!state.token || state.loadingHist) return;
+  if (!initial && !state.hasMore) return;
+  state.loadingHist = true; setOlderBtn();
+  const before = initial ? 0 : (state.minSeq || 0);
+  try {
+    const r = await fetch(historyUrl(before), { cache:'no-store' });
+    if (r.status === 401) {
+      state.token = ''; LS.set('token','');
+      showTokenMask(true); return;
+    }
+    if (!r.ok) return;
+    const data = await r.json();
+    const evs = data.events || [];
+    state.hasMore = !!data.has_more;
+    const feed = $('#feed');
+    const prevH = feed.scrollHeight, prevY = window.scrollY;
+    if (initial) {
+      state.events = evs.slice();
+      feed.innerHTML = '';
+      evs.forEach(ev => render(ev, false));
+      state.eventCount = evs.filter(e => e.kind !== 'meta').length;
+      $('#evtCount').textContent = '事件 ' + state.eventCount;
+      state.minSeq = evs.length ? evs[0].seq : 0;
+      if (!evs.length) state.hasMore = false;
+      if (evs.length && $('#autoscroll').checked)
+        window.scrollTo(0, document.body.scrollHeight);
+    } else {
+      for (let i = evs.length - 1; i >= 0; i--) render(evs[i], true);
+      state.events = evs.concat(state.events);
+      trimEvents();  // 同步裁剪 + 把 minSeq 挪到剩余最早 seq
+      window.scrollTo(0, prevY + (feed.scrollHeight - prevH));
+    }
+  } catch (e) {
+    // 服务没起/网络抖动：保持现状，下次点按钮再试
+  } finally {
+    state.loadingHist = false; setOlderBtn();
+  }
+}
+$('#older').onclick = () => loadHistory(false);
 
 // ── token ─────────────────────────────────────────────────────
 if (state.token) $('#tokenMask').style.display = 'none';
@@ -364,7 +451,8 @@ $('#pause').onclick = () => {
   }
 };
 $('#clear').onclick = () => { $('#feed').innerHTML=''; state.events=[];
-  state.eventCount=0; $('#evtCount').textContent=''; };
+  state.eventCount=0; state.minSeq=0; state.hasMore=true;
+  $('#evtCount').textContent=''; setOlderBtn(); };
 $('#export').onclick = () => {
   const blob = new Blob([JSON.stringify(state.events, null, 2)],
     { type:'application/json' });
@@ -393,6 +481,7 @@ document.querySelector('input[data-f=all]').onchange = e => {
   refreshFilter();
 };
 
+setOlderBtn();
 bootstrap();
 </script>
 </body>

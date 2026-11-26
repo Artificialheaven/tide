@@ -2,6 +2,7 @@ import _imp
 import importlib
 import inspect
 import threading
+import concurrent.futures
 import websockets
 from core import globals
 import sys
@@ -23,6 +24,10 @@ _reload_lock = threading.RLock()
 # 实例级关停标记：ashutdown/_call_stop 调过 on_stop 后打上，atexit 不再重复调。
 # 必须挂实例而不是插件名——热重载后的同名新实例不能被旧标记污染
 _STOP_MARK = '_tide_on_stop_done'
+
+# _call_stop 在事件循环线程内只能异步调度 on_stop：强引用这些 task，
+# 由 adrain_background / ashutdown 统一有界回收
+_PENDING_STOPS: set = set()
 
 
 def _mark_stopped(inst) -> None:
@@ -102,8 +107,7 @@ def _parse_requirement(requirement: str):
     specs = []
     for op, ver in re.findall(r'(~=|===|==|!=|>=|<=|>|<)\s*([0-9][A-Za-z0-9._!+*-]*)',
                               m.group(2)):
-        specs.append((op, tuple(int(x) if x.isdigit() else x
-                                for x in re.split(r'[.]', ver))))
+        specs.append((op, tuple(int(x) for x in re.findall(r'\d+', ver)) or (0,)))
     return name, specs
 
 
@@ -160,8 +164,9 @@ def check_package_in_lib(lib_path: str, package_name: str) -> bool:
                     continue
                 if not specs:
                     return True
-                ver_parts = tuple(int(x) if x.isdigit() else x
-                                  for x in re.split(r'[.]', parts[1]))
+                # 只保留数字段：2.0rc1 这类预发布混入字符串后与 int
+                # 比较会抛 TypeError，被兜底成“未安装”导致每次加载重装
+                ver_parts = tuple(int(x) for x in re.findall(r'\d+', parts[1])) or (0,)
                 return _version_satisfied(ver_parts, specs)
 
         # 无 dist-info：按导入名（- 与 _ 互换）粗略判断
@@ -201,7 +206,8 @@ def install_to_plugin_lib(requirements_file: str, plugin_name: str, plugin_dir: 
     try:
         # 读取 requirements.txt
         with open(requirements_file, 'r', encoding='utf-8') as f:
-            requirements = [line.strip() for line in f if line.strip() and not line.startswith('#')]
+            requirements = [line.strip() for line in f
+                            if line.strip() and not line.strip().startswith('#')]
         
         if not requirements:
             print(f"[{plugin_name}] requirements.txt 为空，跳过安装")
@@ -237,36 +243,22 @@ def install_to_plugin_lib(requirements_file: str, plugin_name: str, plugin_dir: 
             '--no-warn-script-location'
         ]
 
-        print(f"[{plugin_name}] 正在安装依赖到 lib 目录（实时输出 pip 日志）...")
-        # 实时流式输出：逐行读 pip 的 stdout/stderr 转发到控制台/日志窗口，
-        # 同时缓存末尾若干行用于失败诊断（不再 --quiet 黑箱等待）
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding='utf-8',
-            errors='replace',
-            bufsize=1,
-        )
-        tail_lines = []
-        deadline = time.time() + 300
+        print(f"[{plugin_name}] 正在安装依赖到 lib 目录（pip 输出在结束时汇总显示）...")
+        # 有界等待：pip 卡在认证/网络时会一行输出都没有，逐行读 + 循环后置
+        # 超时检查（旧实现）等于无限期冻住事件循环。communicate 带超时兜底。
         try:
-            for line in proc.stdout:
-                line = line.rstrip()
-                if not line:
-                    continue
-                print(f"[{plugin_name}|pip] {line}", flush=True)
-                tail_lines.append(line)
-                if len(tail_lines) > 40:
-                    tail_lines.pop(0)
-                if time.time() > deadline:
-                    proc.kill()
-                    raise subprocess.TimeoutExpired(cmd, 300)
-            proc.wait()
-        finally:
-            if proc.poll() is None:
-                proc.kill()
+            out, _ = proc.communicate(timeout=180)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            try:
+                proc.communicate(timeout=5)
+            except Exception:
+                pass
+            print(f"[{plugin_name}] 依赖安装超时（180s），已终止 pip", flush=True)
+            return False
+        tail_lines = [ln.rstrip() for ln in (out or '').splitlines() if ln.strip()]
+        for line in tail_lines[-40:]:
+            print(f"[{plugin_name}|pip] {line}", flush=True)
 
         if proc.returncode == 0:
             print(f"[{plugin_name}] 依赖安装成功到: {lib_path}")
@@ -459,38 +451,76 @@ class PluginLogger:
         self.info("框架", self.plugin_name, content)
 
 
-def _call_stop(inst, timeout: float = 10.0):
-    """调用插件实例的 on_stop（支持同步/异步）。
+def _wait_stop_future(future, timeout: float) -> bool:
+    """有界等待 on_stop 的 concurrent.futures.Future，返回是否干净结束。
 
-    事件循环线程外：异步 on_stop 经 run_coroutine_threadsafe 阻塞等待。
-    事件循环线程内：无法阻塞等待，跳过（在循环线程内请用
-    PluginManager.ashutdown_all_plugins 直接 await）。
+    超时时显式 cancel 旧实例的 on_stop 协程，并把「未干净结束」作为结果返回。
+    以前 TimeoutError 被 _call_stop 的兜底 except 吞掉，旧 on_stop 继续跑、
+    新实例已经 import，形成新旧实例并存（审计 P0-3）。
+    """
+    try:
+        future.result(timeout=timeout)
+        return True
+    except (TimeoutError, concurrent.futures.TimeoutError):
+        print(f'[卸载] on_stop 超过 {timeout:.1f}s 未结束，取消旧实例的 on_stop 协程')
+        try:
+            future.cancel()
+        except BaseException:
+            print('[卸载] 取消 on_stop future 失败:')
+            traceback.print_exc()
+        return False
+    except BaseException:
+        # 含 CancelledError（BaseException）：循环关闭期 future 可能被取消。
+        # 异常同样意味着 stop 不干净，交给调用方拒绝重载。
+        print('[卸载] on_stop 执行异常:')
+        traceback.print_exc()
+        return False
+
+
+def _call_stop(inst, timeout: float = 10.0) -> bool:
+    """调用插件实例的 on_stop（支持同步/异步），返回 on_stop 是否干净结束。
+
+    事件循环线程外：异步 on_stop 经 run_coroutine_threadsafe 有界等待；
+    超时会 cancel 旧协程并返回 False。
+    事件循环线程内：不能阻塞等待，只能异步调度并返回 False。
+    返回 False 时上层（unload_plugin / reload_plugin）必须拒绝继续卸载/重载，
+    否则旧实例的 on_stop 协程会和新实例并存。
     """
     method = getattr(inst, 'on_stop', None)
     if method is None:
-        return
-    try:
-        if inspect.iscoroutinefunction(method):
-            try:
-                asyncio.get_running_loop()
-                in_loop = True
-            except RuntimeError:
-                in_loop = False
-            loop = globals.event_loop
-            if in_loop:
-                print('[卸载] 警告: 在事件循环线程内无法同步等待 on_stop，已跳过')
-                return
-            if loop is not None and loop.is_running():
-                future = asyncio.run_coroutine_threadsafe(method(), loop)
-                future.result(timeout=timeout)
-            else:
-                print('[卸载] 事件循环不可用，跳过异步 on_stop')
-        else:
+        return True
+    if not inspect.iscoroutinefunction(method):
+        try:
             method()
-    except BaseException:
-        # 含 CancelledError（BaseException）：循环关闭期 future 可能被取消
-        print('[卸载] on_stop 执行异常:')
-        traceback.print_exc()
+            return True
+        except BaseException:
+            print('[卸载] on_stop 执行异常:')
+            traceback.print_exc()
+            return False
+    try:
+        asyncio.get_running_loop()
+        in_loop = True
+    except RuntimeError:
+        in_loop = False
+    if in_loop:
+        # 不能在此阻塞，但也绝不能直接跳过：把 on_stop 作为独立 task
+        # 保住强引用，unload 完成后再跑清理（否则 MCP/线程全泄漏）
+        task = asyncio.get_running_loop().create_task(method())
+        _PENDING_STOPS.add(task)
+        task.add_done_callback(_PENDING_STOPS.discard)
+        print('[卸载] 在事件循环线程内，on_stop 已改为异步调度（本次卸载判定为未完成）')
+        return False
+    loop = globals.event_loop
+    if loop is not None and loop.is_running():
+        try:
+            future = asyncio.run_coroutine_threadsafe(method(), loop)
+        except BaseException:
+            print('[卸载] 提交 on_stop 到事件循环失败:')
+            traceback.print_exc()
+            return False
+        return _wait_stop_future(future, timeout)
+    print('[卸载] 事件循环不可用，跳过异步 on_stop')
+    return False
 
 
 def _clear_plugin_modules(plugin_dir: str) -> list:
@@ -677,6 +707,13 @@ class PluginManager:
                             try:
                                 loop = asyncio.get_running_loop()
                                 task = asyncio.create_task(self._safe_call_on_start(on_start_method, plugin_name))
+                                # 强引用保留：否则 task 可能被 GC；断开重连时
+                                # ashutdown 先等这些 on_start 跑完，避免 on_stop
+                                # 先停、on_start 后把后台循环重新拉起来
+                                if not hasattr(self, '_on_start_tasks'):
+                                    self._on_start_tasks = set()
+                                self._on_start_tasks.add(task)
+                                task.add_done_callback(self._on_start_tasks.discard)
                                 print(f"[{plugin_name}] on_start 异步任务已创建")
                             except RuntimeError:
                                 # 当前线程无运行中的事件循环 → 线程安全调度到主循环
@@ -791,6 +828,13 @@ class PluginManager:
                             try:
                                 loop = asyncio.get_running_loop()
                                 task = asyncio.create_task(self._safe_call_on_start(on_start_method, plugin_name))
+                                # 强引用保留：否则 task 可能被 GC；断开重连时
+                                # ashutdown 先等这些 on_start 跑完，避免 on_stop
+                                # 先停、on_start 后把后台循环重新拉起来
+                                if not hasattr(self, '_on_start_tasks'):
+                                    self._on_start_tasks = set()
+                                self._on_start_tasks.add(task)
+                                task.add_done_callback(self._on_start_tasks.discard)
                                 print(f"[{plugin_name}] on_start 异步任务已创建")
                             except RuntimeError:
                                 # 当前线程无运行中的事件循环 → 线程安全调度到主循环
@@ -859,28 +903,101 @@ class PluginManager:
         """获取所有插件信息"""
         return self.plugin_info
     
+    def _plugin_key_of(self, plugin_name: str):
+        """把插件名（显示名或文件夹名）解析成 plugins/plugin_info 里的键。"""
+        if plugin_name in self.plugins or plugin_name in self.plugin_info:
+            return plugin_name
+        for key, info in self.plugin_info.items():
+            if info.get('name') == plugin_name:
+                return key
+        return None
+
+    def _remove_handlers(self, plugin_key: str):
+        for event_type in list(self.event_handlers.keys()):
+            self.event_handlers[event_type] = [
+                h for h in self.event_handlers[event_type]
+                if h.get('plugin_key') != plugin_key
+            ]
+            if not self.event_handlers[event_type]:
+                del self.event_handlers[event_type]
+
+    def _register_handlers(self, plugin_key: str, inst) -> int:
+        """（重新）注册插件实例的事件处理器；重复调用会先清掉旧条目。"""
+        self._remove_handlers(plugin_key)
+        if hasattr(inst, 'register'):
+            handlers = inst.register()
+        elif hasattr(inst, 'regisiter'):
+            handlers = inst.regisiter()
+        else:
+            handlers = []
+        name = getattr(inst, 'name', plugin_key)
+        count = 0
+        for handler in handlers or []:
+            event_type = handler['listen']
+            self.event_handlers.setdefault(event_type, []).append({
+                'callback': handler['function'],
+                'plugin_name': name,
+                'plugin_key': plugin_key,
+            })
+            count += 1
+        return count
+
+    def _call_lifecycle(self, inst, method_name: str):
+        """线程安全地触发 on_start / on_stop（异步方法经主循环调度）。"""
+        method = getattr(inst, method_name, None)
+        if method is None:
+            return
+        try:
+            if inspect.iscoroutinefunction(method):
+                try:
+                    asyncio.get_running_loop()
+                    in_loop = True
+                except RuntimeError:
+                    in_loop = False
+                loop = globals.event_loop
+                if in_loop:
+                    # 强引用保住 task（否则可能被 GC），并纳入 _bg_stops 让
+                    # adrain_background 能在关停时 gather 收尾（审计 P0-3）
+                    task = asyncio.create_task(method())
+                    self._bg_stops.add(task)
+                    task.add_done_callback(self._bg_stops.discard)
+                elif loop is not None and loop.is_running():
+                    asyncio.run_coroutine_threadsafe(method(), loop)
+                else:
+                    print(f'[插件] 事件循环不可用，跳过 {method_name}')
+            else:
+                method()
+        except Exception as e:
+            print(f'[插件] {method_name} 执行失败: {e}')
+            traceback.print_exc()
+
     def enable_plugin(self, plugin_name: str):
-        """启用插件"""
-        if plugin_name in self.plugin_info:
-            self.plugin_info[plugin_name]['enabled'] = True
+        """启用插件：恢复事件处理器并重新触发 on_start。"""
+        key = self._plugin_key_of(plugin_name)
+        if key is None:
+            return False
+        info = self.plugin_info[key]
+        if info.get('enabled'):
             return True
-        return False
-    
+        info['enabled'] = True
+        inst = self.plugins.get(key)
+        if inst is not None:
+            self._register_handlers(key, inst)
+            self._call_lifecycle(inst, 'on_start')
+        return True
+
     def disable_plugin(self, plugin_name: str):
-        """禁用插件"""
-        if plugin_name in self.plugin_info:
-            self.plugin_info[plugin_name]['enabled'] = False
-            # 清理事件处理器（使用 plugin_key 精确匹配）
-            for event_type in list(self.event_handlers.keys()):
-                original_count = len(self.event_handlers[event_type])
-                self.event_handlers[event_type] = [
-                    h for h in self.event_handlers[event_type]
-                    if h['plugin_key'] != plugin_name
-                ]
-                if not self.event_handlers[event_type]:
-                    del self.event_handlers[event_type]
-            return True
-        return False
+        """禁用插件：摘掉事件处理器并触发 on_stop（停掉后台服务）。"""
+        key = self._plugin_key_of(plugin_name)
+        if key is None:
+            return False
+        info = self.plugin_info[key]
+        info['enabled'] = False
+        self._remove_handlers(key)
+        inst = self.plugins.get(key)
+        if inst is not None:
+            self._call_lifecycle(inst, 'on_stop')
+        return True
     
     def reload_plugin(self, plugin_name: str):
         """
@@ -899,8 +1016,13 @@ class PluginManager:
             print(f"[热重载] 开始重新加载插件: {plugin_name}")
 
             try:
-                # 1. 卸载旧插件
-                self.unload_plugin(plugin_name)
+                # 1. 卸载旧插件；on_stop 未干净结束时拒绝继续（否则新旧实例并存）
+                if not self.unload_plugin(plugin_name):
+                    print(f"[热重载] 插件 {plugin_name} 的 on_stop 未干净结束，"
+                          f"拒绝重新加载（避免新旧实例并存）")
+                    if plugin_name in self.plugin_info:
+                        self.plugin_info[plugin_name]['error'] = 'on_stop 未干净结束，已拒绝重载'
+                    return False
 
                 # 2~4. 清模块缓存 / 清 __pycache__ / 重新导入（同一把 import 锁内）
                 plugin_dir = os.path.join(get_plugins_path(), plugin_name)
@@ -971,6 +1093,18 @@ class PluginManager:
         MCP 生成器 aclose 全部在自己的 task 上下文里跑完（避免 anyio 跨 task 退出
         cancel scope 报错）。一个插件失败不连累其余插件。
         """
+        # 先等异步 on_start 收尾：否则 on_stop 先执行、on_start 随后才把
+        # 定时器/Live 订阅等后台循环重新拉起来，形成关不掉的孤儿任务
+        starts = [t for t in list(getattr(self, '_on_start_tasks', set()))
+                  if not t.done()]
+        if starts:
+            try:
+                await asyncio.wait(starts, timeout=min(timeout, 5.0))
+            except BaseException:
+                pass
+            for t in starts:
+                if not t.done():
+                    t.cancel()
         for key, inst in list(self.plugins.items()):
             if getattr(inst, _STOP_MARK, False):
                 continue
@@ -996,6 +1130,9 @@ class PluginManager:
     async def adrain_background(self, timeout: float = 5.0):
         """有界回收超时残留的 on_stop 兄弟 task（start() 收尾时调）。"""
         pending = [t for t in list(self._bg_stops) if not t.done()]
+        # _call_stop 在循环线程内异步调度的 on_stop 也一并回收
+        pending += [t for t in list(_PENDING_STOPS)
+                    if not t.done() and t not in pending]
         if not pending:
             return
         # gather 返回 Future，ensure_future 原样接受（create_task 只收协程）
@@ -1013,11 +1150,16 @@ class PluginManager:
             _mark_stopped(inst)
 
     def unload_plugin(self, plugin_name: str):
-        """卸载指定插件"""
+        """卸载指定插件。
+
+        :return: True=卸载完成；False=on_stop 未干净结束，拒绝卸载（调用方不应继续重载）
+        """
         if plugin_name in self.plugins:
-            # 先触发 on_stop
+            # 先触发 on_stop；超时/失败时不能删实例，否则旧 on_stop 协程会和新实例并存
             inst = self.plugins[plugin_name]
-            _call_stop(inst)
+            if not _call_stop(inst):
+                print(f"[卸载] 插件 {plugin_name} 的 on_stop 未干净结束，拒绝卸载（避免新旧实例并存）")
+                return False
             # 标记打在旧实例上；同名新实例不受污染，atexit 仍会停新实例
             _mark_stopped(inst)
             del self.plugins[plugin_name]

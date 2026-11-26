@@ -15,6 +15,7 @@ publish 侧写、消费侧读完清零，靠「单生产者」事实保证。
 """
 from __future__ import annotations
 
+import json
 import queue
 import threading
 import time
@@ -32,10 +33,19 @@ EVENT_KINDS = (
     'compact',       # 长跑上下文自动压缩
     'notice',        # 长跑生命周期通知
     'turn_end',      # 一轮对话结束
+    'tool_batch',    # 一批工具调度（并行组/串行结果）
+    'approval_request',  # 审批请求（N-03）
+    'approval_result',   # 审批结果
+    'subagent_start',    # 子代理开始（N-04）
+    'subagent_end',      # 子代理结束
+    'hook_block',        # hook 拦截（N-05）
     'meta',          # 传输层元信息（丢帧计数等，由 SSE 线程直发，不进 ring）
 )
 
 _RING_MAX = 1000
+# ring 总字节预算：单事件最长约 21k 字符，纯按条数限制时 1000 条在 CJK
+# 峰值下可达数十 MB；按 JSON 序列化后的 UTF-8 字节数从最旧开始驱逐。
+_RING_MAX_BYTES = 8 * 1024 * 1024
 _QUEUE_MAX = 200
 _REPLAY_MAX = 200
 
@@ -65,7 +75,10 @@ class LiveBus:
     def __init__(self):
         self._lock = threading.Lock()
         self._seq = 0
-        self._ring: deque = deque(maxlen=_RING_MAX)
+        # ring 与逐条字节数平行保存：逐出时直接减，不必重新序列化旧事件
+        self._ring: deque = deque()
+        self._ring_sizes: deque = deque()
+        self._ring_bytes = 0
         self._subs: set[Subscription] = set()
 
     # ── 订阅侧（HTTP 线程）──────────────────────────────────────
@@ -83,6 +96,44 @@ class LiveBus:
         with self._lock:
             self._subs.discard(sub)
 
+    @staticmethod
+    def _event_size(ev: dict) -> int:
+        """单事件内存估算：JSON 序列化后的 UTF-8 字节数（CJK 按 3 字节）。
+
+        序列化失败时退化为一个保守的固定值，避免预算统计因单个坏事件失真。
+        """
+        try:
+            return len(json.dumps(ev, ensure_ascii=False).encode('utf-8'))
+        except (TypeError, ValueError):
+            return 1024
+
+    def _append_ring(self, ev: dict) -> None:
+        """写 ring，并按「条数 + 总字节」双预算从最旧开始驱逐（调用方持锁）。
+
+        字节预算见 `_RING_MAX_BYTES`；至少保留最近 1 条——单个事件本身超预算
+        时宁可略超，也不丢掉唯一有效事件。
+        """
+        size = self._event_size(ev)
+        self._ring.append(ev)
+        self._ring_sizes.append(size)
+        self._ring_bytes += size
+        while self._ring and (
+                len(self._ring) > _RING_MAX
+                or (self._ring_bytes > _RING_MAX_BYTES
+                    and len(self._ring) > 1)):
+            self._ring.popleft()
+            self._ring_bytes -= self._ring_sizes.popleft()
+
+    def ring_len(self) -> int:
+        """ring 当前事件条数。"""
+        with self._lock:
+            return len(self._ring)
+
+    def ring_bytes(self) -> int:
+        """ring 当前字节占用（按 JSON UTF-8 序列化估算）。"""
+        with self._lock:
+            return self._ring_bytes
+
     def replay(self, last_id, sub: Subscription) -> list:
         """Last-Event-ID 补播：ring 中 seq 更大且本订阅者关心的事件。"""
         try:
@@ -95,6 +146,35 @@ class LiveBus:
             out = [ev for ev in self._ring
                    if ev['seq'] > lid and sub.wants(ev)]
         return out[-_REPLAY_MAX:]
+
+    def older(self, before_seq, limit: int, sub: Subscription) -> list:
+        """加载更早的事件：ring 里 seq 小于 before_seq（<=0 表示最新）且本
+        订阅者关心的那批，按 seq 升序返回。给调试台的「加载更早」用。
+
+        ring 是进程内内存缓冲（_RING_MAX 条），进程重启即清空——所以这只
+        是「本次运行内的历史」，不是持久化归档。
+        """
+        try:
+            before = int(before_seq or 0)
+        except (TypeError, ValueError):
+            before = 0
+        try:
+            n = max(1, min(int(limit or 200), 500))
+        except (TypeError, ValueError):
+            n = 200
+        with self._lock:
+            out = [ev for ev in self._ring
+                   if (before <= 0 or ev['seq'] < before) and sub.wants(ev)]
+            oldest = self._ring[0]['seq'] if self._ring else 0
+        return out[-n:]
+
+    def oldest_seq(self) -> int:
+        with self._lock:
+            return self._ring[0]['seq'] if self._ring else 0
+
+    def latest_seq(self) -> int:
+        with self._lock:
+            return self._seq
 
     def count(self) -> int:
         with self._lock:
@@ -112,6 +192,13 @@ class LiveBus:
             subs = list(self._subs)
             self._subs.clear()
         for s in subs:
+            # 队列满时 put_nowait(CLOSE) 会被丢弃导致 SSE 线程悬挂：
+            # 先清空旧事件再放哨兵，保证关闭信号一定送达
+            while True:
+                try:
+                    s.queue.get_nowait()
+                except queue.Empty:
+                    break
             try:
                 s.queue.put_nowait(CLOSE)
             except queue.Full:
@@ -131,7 +218,7 @@ class LiveBus:
                   'chat_type': fields.pop('chat_type', '') or 'group',
                   'turn_id': fields.pop('turn_id', '') or '',
                   **fields}
-            self._ring.append(ev)
+            self._append_ring(ev)
             subs = list(self._subs)
         for sub in subs:
             if not sub.wants(ev):

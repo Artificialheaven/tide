@@ -138,24 +138,24 @@ class bot:
             await self.websocket.send(json.dumps(data, ensure_ascii=False))
             # self.Logger.info(response, source, f"消息已发送 (echo: {echo})")
             
-            # 增加发送计数
-            self.increment_sent()
-            
             # 等待响应（设置超时时间30秒）
             resp = await asyncio.wait_for(future, timeout=30.0)
+            # 收到成功响应后才计入“已发送”，失败不该增加统计
+            self.increment_sent()
             self.Logger.warning(response, source, f"收到响应 (echo: {echo})")
             
             return resp
             
         except asyncio.TimeoutError:
             self.Logger.error(response, source, f"请求超时 (echo: {echo})")
-            self.pending_requests.pop(echo, None)
             raise Exception("请求超时")
         except Exception as e:
             self.Logger.error(response, source, f"发送消息失败: {e}")
-            if echo in self.pending_requests:
-                del self.pending_requests[echo]
             raise
+        finally:
+            self.pending_requests.pop(echo, None)
+            if not future.done():
+                future.cancel()
 
     async def get_group_list(self, plugin_name=None, no_cache=False):
         """
@@ -279,13 +279,14 @@ class bot:
                 
             except asyncio.TimeoutError:
                 self.Logger.error(response, source, f"API调用超时: {action} (echo: {echo})")
-                self.pending_requests.pop(echo, None)
                 raise Exception(f"API调用超时: {action}")
             except Exception as e:
                 self.Logger.error(response, source, f"API调用失败: {e}")
-                if echo in self.pending_requests:
-                    del self.pending_requests[echo]
                 raise
+            finally:
+                self.pending_requests.pop(echo, None)
+                if not future.done():
+                    future.cancel()
 
     async def call_api_parallel(self, api_calls, plugin_name=None):
         """

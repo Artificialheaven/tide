@@ -16,7 +16,7 @@ def get_application_path():
 # 默认配置
 default_config = {
     "show_heartbeat": True,
-    "ws_address": "ws://localhost:8080",
+    "ws_address": "ws://127.0.0.1:3001",  # NapCat/LLOneBot 默认；按你的 OneBot 实现改
     "token": "",
     "use_plugin_venv": True,
     "enable_web_admin": False,

@@ -1,0 +1,391 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tide · 大肥鱼 — 设计基线（仪表盘）</title>
+<style>
+/* ========== tokens（与方案书 §3 一致） ========== */
+:root{
+  --tds-bg:#0B1018; --tds-surface:#121A28; --tds-surface-2:#172133; --tds-surface-3:#1D2A40;
+  --tds-border:#24314A; --tds-border-strong:#33455F;
+  --tds-text:#E9EFF8; --tds-text-2:#B3C0D3; --tds-muted:#8494AB;
+  --tds-accent:#45C4F5; --tds-accent-hover:#6FD3FA; --tds-accent-ink:#04141F;
+  --tds-success:#3FB950; --tds-warning:#E3B341; --tds-danger:#F85149;
+  --tds-r-sm:6px; --tds-r-md:10px; --tds-r-lg:14px;
+  --tds-shadow-1:0 1px 2px rgba(0,0,0,.30);
+  --tds-shadow-2:0 12px 32px rgba(0,0,0,.45);
+  --tds-font:-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+  --tds-mono:"JetBrains Mono","Cascadia Code",Consolas,monospace;
+  /* 兼容旧变量 */
+  --bg:var(--tds-bg); --card:var(--tds-surface); --border:var(--tds-border);
+  --text:var(--tds-text); --muted:var(--tds-muted); --accent:var(--tds-accent);
+}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--tds-bg);color:var(--tds-text);font:14px/1.6 var(--tds-font);
+  -webkit-font-smoothing:antialiased}
+a{color:var(--tds-accent);text-decoration:none}
+:focus-visible{outline:2px solid var(--tds-accent);outline-offset:2px;border-radius:4px}
+
+/* ========== 外壳 ========== */
+.shell{display:grid;grid-template-columns:236px 1fr;min-height:100vh}
+.sidebar{background:#0E1521;border-right:1px solid var(--tds-border);
+  padding:18px 12px;display:flex;flex-direction:column;gap:4px;position:sticky;top:0;height:100vh}
+.brand{display:flex;align-items:center;gap:10px;padding:4px 10px 18px}
+.brand .mark{width:28px;height:28px;border-radius:8px;
+  background:linear-gradient(135deg,var(--tds-accent),#2E9BD8);
+  display:grid;place-items:center;color:var(--tds-accent-ink);font-weight:800;font-size:15px}
+.brand b{font-size:15px;letter-spacing:.2px}
+.brand span{font-size:11px;color:var(--tds-muted);display:block;font-weight:400;letter-spacing:.4px}
+.nav-group{margin-top:14px}
+.nav-group>p{font-size:11px;color:var(--tds-muted);letter-spacing:.08em;
+  text-transform:uppercase;padding:0 12px 6px}
+.nav-item{display:flex;align-items:center;gap:10px;padding:8px 12px;border-radius:var(--tds-r-sm);
+  color:var(--tds-text-2);font-size:13.5px;cursor:pointer;border:0;background:none;width:100%;
+  text-align:left;position:relative}
+.nav-item:hover{background:var(--tds-surface-2);color:var(--tds-text)}
+.nav-item.active{background:var(--tds-surface-3);color:var(--tds-text);font-weight:600}
+.nav-item.active::before{content:"";position:absolute;left:0;top:8px;bottom:8px;width:2px;
+  border-radius:2px;background:var(--tds-accent)}
+.nav-item svg{width:18px;height:18px;flex:none;stroke:currentColor;fill:none;
+  stroke-width:1.75;stroke-linecap:round;stroke-linejoin:round;opacity:.9}
+.sidebar-foot{margin-top:auto;padding:12px;font-size:12px;color:var(--tds-muted);
+  display:flex;justify-content:space-between;align-items:center;border-top:1px solid var(--tds-border)}
+
+.main{min-width:0;display:flex;flex-direction:column}
+.topbar{height:56px;display:flex;align-items:center;justify-content:space-between;
+  padding:0 28px;border-bottom:1px solid var(--tds-border);background:rgba(11,16,24,.85);
+  backdrop-filter:blur(8px);position:sticky;top:0;z-index:10}
+.crumb{font-size:13px;color:var(--tds-muted)}
+.crumb b{color:var(--tds-text);font-weight:600}
+.topbar-actions{display:flex;align-items:center;gap:10px}
+.content{padding:24px 28px 40px;max-width:1320px;width:100%;margin:0 auto}
+
+/* ========== 组件 ========== */
+.btn{display:inline-flex;align-items:center;gap:6px;height:36px;padding:0 14px;border-radius:var(--tds-r-sm);
+  border:1px solid var(--tds-border);background:var(--tds-surface);color:var(--tds-text);
+  font-size:13px;font-weight:500;cursor:pointer;transition:background .12s,border-color .12s}
+.btn:hover{background:var(--tds-surface-2);border-color:var(--tds-border-strong)}
+.btn-primary{background:var(--tds-accent);border-color:var(--tds-accent);color:var(--tds-accent-ink);font-weight:600}
+.btn-primary:hover{background:var(--tds-accent-hover);border-color:var(--tds-accent-hover)}
+.btn-danger{border-color:var(--tds-danger);color:var(--tds-danger);background:transparent}
+.btn-danger:hover{background:rgba(248,81,73,.12)}
+.btn-sm{height:30px;padding:0 10px;font-size:12px}
+.badge{display:inline-flex;align-items:center;gap:6px;height:22px;padding:0 8px;border-radius:999px;
+  font-size:11.5px;font-weight:600;background:var(--tds-surface-2);color:var(--tds-text-2)}
+.badge .dot{width:6px;height:6px;border-radius:50%;background:currentColor}
+.badge-ok{background:rgba(63,185,80,.14);color:var(--tds-success)}
+.badge-warn{background:rgba(227,179,65,.14);color:var(--tds-warning)}
+.badge-danger{background:rgba(248,81,73,.14);color:var(--tds-danger)}
+.page-head{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;margin-bottom:20px}
+.page-head h1{font-size:24px;line-height:1.3;font-weight:600}
+.page-head p{font-size:13px;color:var(--tds-muted);margin-top:4px}
+.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:20px}
+.card{background:var(--tds-surface);border:1px solid var(--tds-border);border-radius:var(--tds-r-md);
+  box-shadow:var(--tds-shadow-1)}
+.kpi{padding:16px 18px}
+.kpi h3{font-size:12px;color:var(--tds-muted);font-weight:500;letter-spacing:.02em}
+.kpi .val{font-size:28px;font-weight:700;line-height:1.2;margin-top:6px;
+  font-variant-numeric:tabular-nums;color:#fff}
+.kpi .sub{font-size:12px;color:var(--tds-muted);margin-top:4px}
+.kpi .up{color:var(--tds-success)}
+.kpi .down{color:var(--tds-danger)}
+.grid2{display:grid;grid-template-columns:1.55fr 1fr;gap:16px;margin-bottom:20px}
+.card-head{display:flex;align-items:center;justify-content:space-between;padding:14px 18px;
+  border-bottom:1px solid var(--tds-border)}
+.card-head h2{font-size:15px;font-weight:600}
+.card-head .hint{font-size:12px;color:var(--tds-muted)}
+.card-body{padding:16px 18px}
+.legend{display:flex;gap:16px;font-size:12px;color:var(--tds-text-2)}
+.legend i{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:6px}
+/* 表格 */
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--tds-muted);
+  font-weight:600;text-align:left;padding:10px 12px;border-bottom:1px solid var(--tds-border)}
+td{padding:12px;border-bottom:1px solid var(--tds-border);vertical-align:middle}
+tbody tr:hover{background:var(--tds-surface-2)}
+td.num{font-variant-numeric:tabular-nums;text-align:right;color:var(--tds-text-2)}
+td .name{font-weight:600}
+td .gid{font-size:12px;color:var(--tds-muted);margin-left:6px}
+.tokbar{display:flex;height:6px;border-radius:3px;overflow:hidden;width:110px;margin-left:auto}
+.tokbar i{height:100%}
+/* 日志台 */
+.terminal{background:#080D14;border:1px solid var(--tds-border);border-radius:var(--tds-r-sm);
+  padding:12px;font:12px/1.65 var(--tds-mono);max-height:260px;overflow:auto}
+.logline{display:flex;gap:10px;padding:2px 0;white-space:pre-wrap}
+.logline .t{color:var(--tds-muted);flex:none}
+.logline .s{color:#BC8CFF;flex:none}
+.logline.error .m{color:var(--tds-danger)}
+.logline.warn .m{color:var(--tds-warning)}
+.logline.ok .m{color:var(--tds-success)}
+.toast{position:fixed;right:24px;top:20px;display:flex;gap:10px;align-items:flex-start;
+  background:var(--tds-surface-2);border:1px solid var(--tds-border-strong);border-radius:var(--tds-r-sm);
+  box-shadow:var(--tds-shadow-2);padding:12px 14px;max-width:340px;font-size:13px;
+  animation:in .18s cubic-bezier(.2,.7,.3,1)}
+.toast .ico{width:18px;height:18px;border-radius:50%;flex:none;margin-top:1px;
+  display:grid;place-items:center;background:rgba(63,185,80,.16);color:var(--tds-success);font-size:11px}
+@keyframes in{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:none}}
+.muted{color:var(--tds-muted)}
+.switch{position:relative;width:32px;height:18px;border-radius:999px;background:var(--tds-surface-3);
+  border:0;cursor:pointer;transition:background .18s;flex:none}
+.switch::after{content:"";position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;
+  background:#fff;transition:transform .18s}
+.switch.on{background:var(--tds-accent)}
+.switch.on::after{transform:translateX(14px);background:var(--tds-accent-ink)}
+.empty{padding:40px 16px;text-align:center;color:var(--tds-muted);font-size:13px}
+
+@media (max-width:1023px){
+  .shell{grid-template-columns:64px 1fr}
+  .brand span,.nav-group>p,.nav-item .lbl,.sidebar-foot span{display:none}
+  .nav-item{justify-content:center;padding:10px 0}
+  .grid2{grid-template-columns:1fr}
+  .kpis{grid-template-columns:repeat(2,1fr)}
+}
+@media (max-width:767px){
+  .shell{grid-template-columns:1fr}
+  .sidebar{position:fixed;inset:0 auto 0 0;width:236px;transform:translateX(-100%);
+    transition:transform .24s;z-index:100}
+  .sidebar.open{transform:none}
+  .content{padding:16px}
+  .topbar{padding:0 16px}
+  .kpis{grid-template-columns:1fr}
+  table thead{display:none}
+  tbody tr{display:grid;grid-template-columns:1fr 1fr;gap:6px;padding:12px 4px;
+    border-bottom:1px solid var(--tds-border)}
+  tbody td{border:0;padding:2px 8px}
+  tbody td::before{content:attr(data-label);display:block;font-size:11px;color:var(--tds-muted)}
+  .tokbar{width:80px;margin-left:0}
+}
+</style>
+</head>
+<body>
+<div class="shell">
+
+  <!-- ============ 侧栏 ============ -->
+  <aside class="sidebar" id="sidebar" aria-label="主导航">
+    <div class="brand">
+      <div class="mark">≈</div>
+      <div><b>Tide</b><span>大肥鱼 · 管理台</span></div>
+    </div>
+
+    <div class="nav-group">
+      <p>总览</p>
+      <button class="nav-item active">
+        <svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>
+        <span class="lbl">仪表盘</span>
+      </button>
+      <button class="nav-item">
+        <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg>
+        <span class="lbl">状态</span>
+      </button>
+    </div>
+
+    <div class="nav-group">
+      <p>管理</p>
+      <button class="nav-item">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-2.9 1.2v.2a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-2.9-1.2l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0-1.2-2.9H2a2 2 0 1 1 0-4h.2a1.7 1.7 0 0 0 1.2-2.9l-.1-.1A2 2 0 1 1 6.1 4l.1.1a1.7 1.7 0 0 0 2.9-1.2V2a2 2 0 1 1 4 0v.2a1.7 1.7 0 0 0 2.9 1.2l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0 1.2 2.9h.2a2 2 0 1 1 0 4h-.2a1.7 1.7 0 0 0-1.5 1z"/></svg>
+        <span class="lbl">系统配置</span>
+      </button>
+      <button class="nav-item">
+        <svg viewBox="0 0 24 24"><path d="M9 3v4M15 3v4M6 7h12v6a6 6 0 0 1-12 0z"/><path d="M12 19v2"/></svg>
+        <span class="lbl">插件</span>
+      </button>
+    </div>
+
+    <div class="nav-group">
+      <p>观测</p>
+      <button class="nav-item">
+        <svg viewBox="0 0 24 24"><path d="M4 5h16v14H4z"/><path d="M7 9l3 3-3 3M13 15h4"/></svg>
+        <span class="lbl">日志</span>
+      </button>
+    </div>
+
+    <div class="nav-group">
+      <p>群 AI</p>
+      <button class="nav-item">
+        <svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"/><circle cx="17" cy="10" r="2.4"/><path d="M3 20c0-3 2.7-5 6-5s6 2 6 5M14 20c0-2 1.4-3.4 3-3.4S20 18 20 20"/></svg>
+        <span class="lbl">群列表</span>
+      </button>
+      <button class="nav-item">
+        <svg viewBox="0 0 24 24"><path d="M4 6h10M4 12h7M4 18h5"/><circle cx="18" cy="6" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="12" cy="18" r="2"/></svg>
+        <span class="lbl">全局设置</span>
+      </button>
+      <button class="nav-item">
+        <svg viewBox="0 0 24 24"><path d="M9 18a6 6 0 1 1 6 0"/><path d="M12 3v2M5 6l1.5 1.5M19 6l-1.5 1.5"/><path d="M9 21h6"/></svg>
+        <span class="lbl">群友记忆</span>
+      </button>
+      <button class="nav-item">
+        <svg viewBox="0 0 24 24"><path d="M14 7l-2-4-2 4"/><rect x="4" y="7" width="16" height="13" rx="2"/><path d="M9 12h.01M15 12h.01"/></svg>
+        <span class="lbl">MCP 工具</span>
+      </button>
+      <button class="nav-item">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 8v4l3 2"/></svg>
+        <span class="lbl">后台 / 轮询</span>
+      </button>
+    </div>
+
+    <div class="sidebar-foot"><span>v2.0.0</span><a href="#" style="font-size:12px">退出</a></div>
+  </aside>
+
+  <!-- ============ 主区 ============ -->
+  <div class="main">
+    <header class="topbar">
+      <div class="crumb">总览 / <b>仪表盘</b></div>
+      <div class="topbar-actions">
+        <span class="badge badge-ok"><i class="dot"></i>已连接 · NapCat</span>
+        <button class="btn btn-sm">重连</button>
+        <button class="btn btn-sm btn-primary" onclick="toast('已保存 3 项配置','success')">保存</button>
+      </div>
+    </header>
+
+    <main class="content">
+      <div class="page-head">
+        <div>
+          <h1>仪表盘</h1>
+          <p>实时收发、连接状态与插件运行概况</p>
+        </div>
+        <div style="display:flex;gap:8px">
+          <button class="btn" onclick="toast('已刷新','success')">刷新</button>
+          <button class="btn btn-primary" onclick="toast('来自设计稿的 Toast 示例','success')">演示反馈</button>
+        </div>
+      </div>
+
+      <!-- KPI -->
+      <section class="kpis">
+        <div class="card kpi">
+          <h3>累计发送</h3>
+          <div class="val">12,803</div>
+          <div class="sub"><span class="up">▲ 2.4%</span> 较昨日</div>
+        </div>
+        <div class="card kpi">
+          <h3>本分钟</h3>
+          <div class="val">14 <span style="font-size:14px;color:var(--tds-muted);font-weight:500">收 / 9 发</span></div>
+          <div class="sub">峰值 31 条</div>
+        </div>
+        <div class="card kpi">
+          <h3>在线群</h3>
+          <div class="val">6 <span style="font-size:14px;color:var(--tds-muted);font-weight:500">/ 9</span></div>
+          <div class="sub">3 个群已关闭</div>
+        </div>
+        <div class="card kpi">
+          <h3>今日消耗</h3>
+          <div class="val">¥1.24</div>
+          <div class="sub">命中率 68% · 输出 21.4k</div>
+        </div>
+      </section>
+
+      <div class="grid2">
+        <!-- 趋势图 -->
+        <section class="card">
+          <div class="card-head">
+            <h2>收发趋势</h2>
+            <div class="legend">
+              <span><i style="background:var(--tds-success)"></i>接收</span>
+              <span><i style="background:var(--tds-accent)"></i>发送</span>
+              <span class="hint">近 20 分钟</span>
+            </div>
+          </div>
+          <div class="card-body">
+            <svg viewBox="0 0 640 224" width="100%" height="216" role="img" aria-label="近 20 分钟收发趋势">
+              <defs>
+                <linearGradient id="gRecv" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0" stop-color="#3FB950" stop-opacity=".28"/>
+                  <stop offset="1" stop-color="#3FB950" stop-opacity="0"/>
+                </linearGradient>
+              </defs>
+              <g stroke="#24314A" stroke-width="1">
+                <line x1="0" y1="40" x2="640" y2="40"/><line x1="0" y1="90" x2="640" y2="90"/>
+                <line x1="0" y1="140" x2="640" y2="140"/><line x1="0" y1="190" x2="640" y2="190"/>
+              </g>
+              <path d="M0 160 L64 150 L128 120 L192 132 L256 96 L320 104 L384 70 L448 86 L512 58 L576 72 L640 52"
+                    fill="none" stroke="#3FB950" stroke-width="2" stroke-linejoin="round"/>
+              <path d="M0 160 L64 150 L128 120 L192 132 L256 96 L320 104 L384 70 L448 86 L512 58 L576 72 L640 52 L640 200 L0 200 Z"
+                    fill="url(#gRecv)"/>
+              <path d="M0 178 L64 170 L128 158 L192 164 L256 146 L320 152 L384 134 L448 142 L512 128 L576 136 L640 120"
+                    fill="none" stroke="#45C4F5" stroke-width="2" stroke-linejoin="round"/>
+              <g fill="#8494AB" font-size="10" font-family="JetBrains Mono, Consolas, monospace">
+                <text x="4" y="216">12:14</text><text x="256" y="216">12:24</text>
+                <text x="532" y="216">12:34</text>
+              </g>
+            </svg>
+          </div>
+        </section>
+
+        <!-- 群列表 -->
+        <section class="card">
+          <div class="card-head">
+            <h2>群列表</h2>
+            <a href="#" class="hint">全部 →</a>
+          </div>
+          <div class="card-body" style="padding:0">
+            <table>
+              <thead><tr><th>群</th><th>状态</th><th style="text-align:right">今日 token</th></tr></thead>
+              <tbody>
+                <tr>
+                  <td data-label="群"><span class="name">摸鱼研究所</span><span class="gid">1024</span></td>
+                  <td data-label="状态"><span class="badge badge-ok"><i class="dot"></i>开启</span></td>
+                  <td data-label="今日 token" class="num">
+                    <div class="tokbar" title="命中 68% / 未命中 22% / 输出 10%">
+                      <i style="width:68%;background:var(--tds-success)"></i>
+                      <i style="width:22%;background:var(--tds-warning)"></i>
+                      <i style="width:10%;background:var(--tds-accent)"></i>
+                    </div>
+                  </td>
+                </tr>
+                <tr>
+                  <td data-label="群"><span class="name">深夜代码局</span><span class="gid">2048</span></td>
+                  <td data-label="状态"><span class="badge badge-ok"><i class="dot"></i>开启</span></td>
+                  <td data-label="今日 token" class="num">
+                    <div class="tokbar"><i style="width:41%;background:var(--tds-success)"></i>
+                      <i style="width:49%;background:var(--tds-warning)"></i>
+                      <i style="width:10%;background:var(--tds-accent)"></i></div>
+                  </td>
+                </tr>
+                <tr>
+                  <td data-label="群"><span class="name">只看不说话</span><span class="gid">4096</span></td>
+                  <td data-label="状态"><span class="badge"><i class="dot"></i>关闭</span></td>
+                  <td data-label="今日 token" class="num muted">—</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+
+      <!-- 日志预览 -->
+      <section class="card">
+        <div class="card-head">
+          <h2>实时日志</h2>
+          <div style="display:flex;gap:8px;align-items:center">
+            <span class="badge badge-danger">错误 2</span>
+            <span class="badge badge-warn">警告 5</span>
+            <button class="btn btn-sm">过滤</button>
+            <button class="btn btn-sm">暂停</button>
+          </div>
+        </div>
+        <div class="card-body">
+          <div class="terminal">
+            <div class="logline"><span class="t">12:34:02</span><span class="s">[BOT]</span><span class="m">收到群 1024 消息，进入判官</span></div>
+            <div class="logline ok"><span class="t">12:34:02</span><span class="s">[AI]</span><span class="m">判官放行，开始生成回复（模型 deepseek-v3）</span></div>
+            <div class="logline warn"><span class="t">12:34:05</span><span class="s">[网络]</span><span class="m">发送超时，正在重试（1/3）</span></div>
+            <div class="logline error"><span class="t">12:34:08</span><span class="s">[BOT]</span><span class="m">群 2048 发送失败：retcode=100，目标不存在</span></div>
+            <div class="logline"><span class="t">12:34:09</span><span class="s">[调度]</span><span class="m">定时任务 #12 已顺延 5 分钟</span></div>
+          </div>
+          <div class="empty" style="padding:20px 0 4px">示例数据。空列表时显示 <b>图标 + 一句话 + 主操作</b>。</div>
+        </div>
+      </section>
+    </main>
+  </div>
+</div>
+
+<script>
+function toast(msg, type){
+  const el = document.createElement('div');
+  el.className = 'toast';
+  el.innerHTML = '<span class="ico">' + (type==='success'?'✓':'!') + '</span><div>' + msg + '</div>';
+  document.body.appendChild(el);
+  setTimeout(()=>{ el.style.opacity=0; el.style.transition='opacity .2s'; setTimeout(()=>el.remove(),200); }, 2600);
+}
+</script>
+</body>
+</html>

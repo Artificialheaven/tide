@@ -10,8 +10,10 @@ import re
 import time
 import uuid
 
-from . import (builtin_tools, context as ctx_mod, media_in, passive_turn,
-               prompts as prompts_mod, reply, storage)
+from . import (approval as approval_mod, builtin_tools, context as ctx_mod,
+               hooks, media_in, passive_turn, permissions as perms_mod,
+               prompts as prompts_mod, reply, storage, subagent as subagent_mod,
+               tool_batch)
 from .builtin_tools import ToolContext
 from .config import parse_aliases, resolve_group, resolve_persona
 from .interrupt import InterruptHub
@@ -74,6 +76,26 @@ def _wire_tool_calls(tool_calls: list) -> list:
     } for tc in tool_calls]
 
 
+# P2-3：工具轮上下文称重时 tool_calls 的序列化结果按对象身份缓存。
+# messages 在长跑轮会被反复称重（压缩判断/水位采样），而 wire 后的
+# tool_calls 一旦进列表就不再改动；identity 校验保证被替换/改写时重算。
+_TC_WEIGHT_CACHE: dict[int, tuple] = {}
+
+
+def _tool_call_weight(tc) -> int:
+    """单个 tool_call 的序列化字符数（带小缓存，身份不符即重算）。"""
+    key = id(tc)
+    hit = _TC_WEIGHT_CACHE.get(key)
+    if hit is not None and hit[0] is tc:
+        return hit[1]
+    try:
+        n = len(json.dumps(tc, ensure_ascii=False))
+    except (TypeError, ValueError):
+        n = len(str(tc))
+    if len(_TC_WEIGHT_CACHE) >= 512:
+        _TC_WEIGHT_CACHE.clear()
+    _TC_WEIGHT_CACHE[key] = (tc, n)
+    return n
 
 
 class Engine:
@@ -81,9 +103,36 @@ class Engine:
         self.p = plugin
         # 任务打断队列；单测 fake plugin 没挂 InterruptHub 时用独立实例兜底
         self.hub = getattr(plugin, 'interrupts', None) or InterruptHub()
+        # N-02/N-03/N-04：权限、审批、子代理（配置在 decide 时现取，热重载可见）
+        self.permissions = perms_mod.PermissionEngine(
+            getattr(plugin, 'cfg', {}) or {},
+            count_today=self._approval_count_today)
+        self.approvals = approval_mod.ApprovalCenter(
+            getattr(plugin, 'db_path', ''), plugin)
+        self.subagent = subagent_mod.SubagentRunner(self)
+        try:
+            storage.expire_stale_approvals(self.p.db_path)
+            storage.prune_aux_tables(self.p.db_path)
+        except Exception:
+            pass
+        # P0-6：心情判定降频计数（key=gid；只在内存，重启后首轮重新必跑）
+        self._mood_rounds: dict[str, int] = {}
 
     def log(self, msg: str, level: str = 'info'):
         self.p.log(msg, level)
+
+    def _mood_due(self, gid: str, every: int) -> bool:
+        """P0-6：心情判定降频。every<=1 每轮都跑；否则每 every 轮一次，
+        且每群首轮必跑（避免开局没有心情数据）。按群计数，轮次不跨群串味。"""
+        try:
+            n = int(every)
+        except (TypeError, ValueError):
+            n = 3
+        if n <= 1:
+            return True
+        count = self._mood_rounds.get(gid, 0) + 1
+        self._mood_rounds[gid] = count
+        return count == 1 or count % n == 0
 
     def _live(self, kind: str, gid='', chat_type: str = 'group',
               turn_id: str = '', **fields) -> None:
@@ -140,7 +189,11 @@ class Engine:
 
     async def handle(self, event, parsed: ParsedMessage, group_row: dict):
         gid = str(group_row['group_id'])
-        cfg = resolve_group(self.p.cfg, group_row.get('settings'))
+        # P1-5：群级配置走插件侧 (gid, settings 版本) 缓存；单测 fake plugin
+        # 没挂 cfg_for_group 时回落原来的 resolve_group
+        cache_fn = getattr(self.p, 'cfg_for_group', None)
+        cfg = (cache_fn(gid, group_row.get('settings')) if cache_fn
+               else resolve_group(self.p.cfg, group_row.get('settings')))
 
         # 用户档案：无论是否触发都积累昵称/名片（群聊优先群名片）
         storage.upsert_user(self.p.db_path, parsed.sender_id,
@@ -216,7 +269,9 @@ class Engine:
         """group_increase 且入群者是机器人自己：把入群事件作为系统通知落库，
         强制触发一轮对话让 AI 在群里开口（不受群 enabled/触发闸门约束）。"""
         row = storage.get_or_create_group(self.p.db_path, gid)
-        cfg = resolve_group(self.p.cfg, row.get('settings'))
+        cache_fn = getattr(self.p, 'cfg_for_group', None)
+        cfg = (cache_fn(gid, row.get('settings')) if cache_fn
+               else resolve_group(self.p.cfg, row.get('settings')))
         if not cfg.get('join_greet_on', True):
             self.log(f'群 {gid} 入群打招呼已关闭，忽略入群事件', 'warn')
             return
@@ -309,6 +364,15 @@ class Engine:
                 gid, cfg, parsed, True, None, background=True, trace=trace,
                 raw_bg_notice=True, source_kind=source_kind,
                 actor_id=actor_id, actor_name=actor_name)
+        except asyncio.CancelledError:
+            # 插件重载/关停取消后台轮：先收尾 bg_runs，否则永久留“运行中”记录
+            try:
+                storage.bg_run_finish(
+                    self.p.db_path, run_id, 'cancelled', '', trace, 'cancelled',
+                    keep=int(cfg.get('bg_runs_keep', 200)))
+            except Exception:
+                pass
+            raise
         except Exception as e:
             storage.bg_run_finish(
                 self.p.db_path, run_id, 'error', '', trace, str(e),
@@ -322,35 +386,75 @@ class Engine:
         return {'run_id': run_id, 'status': status, **res}
 
     async def handle_trigger(self, gid: str, cfg: dict, text: str,
-                             source: str = '', now=None) -> dict:
+                             source: str = '', now=None, *,
+                             chat_type: str = 'group',
+                             run_kind: str = 'trigger',
+                             source_kind: str = 'work',
+                             actor_id: str = '',
+                             actor_name: str = '',
+                             notice_text: str = '') -> dict:
         """外部监测程序回调：把事件作为系统通知跑一轮后台对话。
 
         与 handle_wake 同构（可 [静默]、bg_runs 留痕、群锁内调用），
         区别只在通知来源：这里是 watcher 经触发接口推送的具体事件。
+
+        chat_type：知会落在群还是私聊（QQ 空间知会默认发主人私聊）。
+        run_kind：bg_runs 的类别（trigger/qzone/...），后台任务页按它分组。
+        source_kind：心情判定口径（human/talk/work）。
+        actor_id/actor_name：事件里的当事人（只进工具上下文做权限判定，
+        不改通知在历史里的「系统」身份）。
+        notice_text：完整覆盖通知正文；不传时用通用触发模板（群里那套）。
         """
         from .triggers import trigger_user_text
         import datetime as _dt
         now = now or _dt.datetime.now()
         text = (text or '').strip()
         source = (source or '').strip()
-        notice_text = trigger_user_text(now, source, text)
+        chat_type = chat_type if chat_type in ('group', 'private') else 'group'
+        notice = (notice_text or '').strip() or trigger_user_text(
+            now, source, text)
+        if chat_type == 'private':
+            # 空间知会落在主人私聊：补 chat_type 标记，别让定时唤醒/提醒
+            # 把它当群（私聊不参与主动搭话，也不该按群发通道发送）
+            row = storage.get_group(self.p.db_path, gid) or {}
+            if (row.get('settings') or {}).get('chat_type') != 'private':
+                st = dict(row.get('settings') or {})
+                st['chat_type'] = 'private'
+                storage.upsert_group(self.p.db_path, gid, settings=st)
         storage.insert_message(
-            self.p.db_path, gid, 'user', notice_text,
+            self.p.db_path, gid, 'user', notice,
             sender_id='', sender_name='系统', name='trigger-notice')
         storage.upsert_group(self.p.db_path, gid, touch=True)
         parsed = ParsedMessage(
-            text=notice_text, sender_id='', sender_name='系统',
-            at_me=True, chat_type='group', allow_silent=True)
+            text=notice, sender_id='', sender_name='系统',
+            at_me=True, chat_type=chat_type, allow_silent=True)
         prompt = f'[{source or "watcher"}] {text}'[:4000]
         run_id = storage.bg_run_start(
-            self.p.db_path, 'trigger', 'group', gid, prompt,
+            self.p.db_path, str(run_kind or 'trigger'), chat_type, gid, prompt,
             started_at=now.timestamp())
         trace: list = [{'k': 'trigger', 'source': source[:40],
                         'text': text[:500]}]
+        # 空间知会轮默认只让模型「看 + 评论/点赞」：发/删说说要主人显式打开
+        # qzone_event_write_on。否则一次别人 @ 就能驱动主人权限发一条说说。
+        deny = frozenset()
+        if str(run_kind or '') == 'qzone' \
+                and not cfg.get('qzone_event_write_on', False):
+            deny = frozenset(('qzone.publish', 'qzone.delete'))
         try:
             res = await self._run_turn(
                 gid, cfg, parsed, True, None, background=True, trace=trace,
-                raw_bg_notice=True, source_kind='work')
+                raw_bg_notice=True, source_kind=source_kind,
+                actor_id=str(actor_id or ''), actor_name=str(actor_name or ''),
+                deny_tools=deny)
+        except asyncio.CancelledError:
+            # 插件重载/关停取消后台轮：先收尾 bg_runs，否则永久留“运行中”记录
+            try:
+                storage.bg_run_finish(
+                    self.p.db_path, run_id, 'cancelled', '', trace, 'cancelled',
+                    keep=int(cfg.get('bg_runs_keep', 200)))
+            except Exception:
+                pass
+            raise
         except Exception as e:
             storage.bg_run_finish(
                 self.p.db_path, run_id, 'error', '', trace, str(e),
@@ -365,15 +469,46 @@ class Engine:
 
     # ── @ / 回复感知 ────────────────────────────────────────────
 
-    def _name_of(self, qq: str) -> str:
-        """QQ 号 → 群友最新昵称/名片（机器人优先用自身昵称）。"""
+    def _prefetch_names(self, qqs, cache: dict) -> None:
+        """P1-5：批量预取昵称（一次 IN 查询替代每个 @ 各开一次连接）。
+
+        结果写进本轮局部 cache（QQ→昵称，取不到记 '' 以免反复回落单查）；
+        批量查询失败时什么都不写，_name_of 会退回单个查询。
+        """
+        need = []
+        bot_id = str(self.p.bot_id or '')
+        for q in qqs or ():
+            q = str(q or '')
+            if q and q != bot_id and q not in cache and q not in need:
+                need.append(q)
+        if not need:
+            return
+        try:
+            rows = storage.get_users_many(self.p.db_path, need)
+        except Exception:
+            return
+        for q in need:
+            names = (rows.get(q) or {}).get('names') or []
+            cache[q] = str(names[0]) if names else ''
+
+    def _name_of(self, qq: str, cache: dict | None = None) -> str:
+        """QQ 号 → 群友最新昵称/名片（机器人优先用自身昵称）。
+
+        cache 为本轮局部缓存（见 _prefetch_names）；命中直接返回，未命中回落单查。
+        """
         if not qq:
             return ''
-        if str(qq) == str(self.p.bot_id):
+        qq = str(qq)
+        if qq == str(self.p.bot_id):
             return self.p.bot_name or '机器人'
+        if cache is not None and qq in cache:
+            return cache[qq]
         row = storage.get_user(self.p.db_path, qq)
         names = (row or {}).get('names') or []
-        return str(names[0]) if names else ''
+        name = str(names[0]) if names else ''
+        if cache is not None:
+            cache[qq] = name
+        return name
 
     async def _roles_block(self, gid: str, parsed, store) -> str:
         """拼本轮在场者的本群身份块；RPC 全部失败/私聊返回 ''。
@@ -427,23 +562,43 @@ class Engine:
         return prompts_mod.render('roles_header', store,
                                   content='\n'.join(lines))
 
-    async def _at_map(self, gid: str, cfg: dict, text: str):
-        """发送出口用的 昵称→QQ 映射；无需艾特/未开启/取目录失败时返回 None。"""
+    async def _at_map(self, gid: str, cfg: dict, text: str,
+                      cache: dict | None = None):
+        """发送出口用的 昵称→QQ 映射；无需艾特/未开启/取目录失败时返回 None。
+
+        cache 是本轮局部缓存（P1-5）：目录解析每轮最多做一次，插话/终态/
+        催场等多次出口共用同一份结果，避免一轮重复拉群成员目录。
+        """
         if not text or '@' not in text or not cfg.get('real_at_on', True):
             return None
         directory = getattr(self.p, 'members', None)
         if directory is None:
             return None
+        key = ('at_map', gid)
+        if cache is not None and key in cache:
+            return cache[key]
         try:
-            return await directory.resolve(gid, self.p.bot, self.p.db_path)
+            resolved = await directory.resolve(gid, self.p.bot, self.p.db_path)
         except Exception:
-            return None
+            resolved = None
+        if cache is not None:
+            cache[key] = resolved
+        return resolved
 
-    def _user_display_text(self, parsed) -> str:
-        """把 @裸QQ 替换成 @昵称；回复消息加 [回复 某人：原内容] 前缀。"""
+    def _user_display_text(self, parsed, cache: dict | None = None) -> str:
+        """把 @裸QQ 替换成 @昵称；回复消息加 [回复 某人：原内容] 前缀。
+
+        P1-5：@/回复目标先批量取昵称（一次 IN 查询），结果缓存到本轮 cache。
+        """
         text = parsed.text or ''
+        if cache is None:
+            cache = {}
+        qqs = list(parsed.at_users or ())
+        if parsed.reply_id and not parsed.reply_to_bot:
+            qqs.append(parsed.reply_to_id)
+        self._prefetch_names(qqs, cache)
         for qq in parsed.at_users:
-            name = (parsed.at_names or {}).get(qq) or self._name_of(qq)
+            name = (parsed.at_names or {}).get(qq) or self._name_of(qq, cache)
             if name:
                 text = text.replace(f'@{qq}', f'@{name}')
 
@@ -452,7 +607,7 @@ class Engine:
                 who = self.p.bot_name or '机器人'
             else:
                 who = (parsed.reply_to_name
-                       or self._name_of(parsed.reply_to_id)
+                       or self._name_of(parsed.reply_to_id, cache)
                        or parsed.reply_to_id)
             quote = f'：{parsed.reply_excerpt}' if parsed.reply_excerpt else ''
             text = f'[回复 {who}{quote}] {text}'.strip()
@@ -489,11 +644,15 @@ class Engine:
             return r.get('content') or ''
         return ''
 
-    def build_interrupt_item(self, parsed, content: str) -> dict:
+    def build_interrupt_item(self, parsed, content: str,
+                             cache: dict | None = None) -> dict:
         """打断指令正文 → 插队消息（@裸QQ 同样解析成 @昵称，与正常落库口径一致）。"""
         text = content or ''
+        if cache is None:
+            cache = {}
+        self._prefetch_names(list(parsed.at_users or ()), cache)
         for qq in parsed.at_users:
-            name = (parsed.at_names or {}).get(qq) or self._name_of(qq)
+            name = (parsed.at_names or {}).get(qq) or self._name_of(qq, cache)
             if name:
                 text = text.replace(f'@{qq}', f'@{name}')
         return {'sender_id': str(parsed.sender_id or ''),
@@ -653,7 +812,7 @@ class Engine:
         head = f'群 {gid} {self._who(parsed)}：「{self._snippet(user_text)}」'
         try:
             should, reason, usage = await self.p.llm.judge(cfg, script, user_text)
-            storage.add_usage(self.p.db_path, {
+            await asyncio.to_thread(storage.add_usage, self.p.db_path, {
                 'group_id': gid, 'kind': 'judge', 'ok': True, **usage})
             verdict = '回复' if should else '不回复'
             why = f'（{reason}）' if reason else ''
@@ -663,7 +822,7 @@ class Engine:
             fail_open = bool(cfg.get('judge_fail_open', False))
             self.log(f'判官 {head} → 调用失败: {e}，'
                      f'{"放行回复" if fail_open else "拦截不回复"}', 'error')
-            storage.add_usage(self.p.db_path, {
+            await asyncio.to_thread(storage.add_usage, self.p.db_path, {
                 'group_id': gid, 'kind': 'judge', 'ok': False})
             return fail_open
 
@@ -675,7 +834,8 @@ class Engine:
                         raw_bg_notice: bool = False,
                         source_kind: str = 'human',
                         loop_ctx: dict | None = None,
-                        actor_id: str = '', actor_name: str = '') -> dict:
+                        actor_id: str = '', actor_name: str = '',
+                        deny_tools=frozenset()) -> dict:
         """一轮完整对话。返回 {final_text, silent, sent_texts}；
         trace 非 None 时往里面追加后台留痕步骤（interim/tool/final）。
         raw_bg_notice=True 时后台触发轮看到系统通知原文（苏醒/入群指令）。
@@ -684,12 +844,31 @@ class Engine:
         只用于工具上下文（主人门禁/归属判定），不覆盖 parsed 的发送人，
         通知在历史里仍按「系统」渲染。"""
         turn_id = uuid.uuid4().hex[:12]
+        # P1-5：本轮局部缓存——昵称批量预取结果 / @昵称→QQ 目录（每轮最多解析一次）
+        name_cache: dict = {}
+        at_cache: dict = {}
+        role = ('owner' if str(getattr(parsed, 'sender_id', '') or '')
+                == str(cfg.get('owner_qq', '')) else 'member')
+        try:
+            v = await hooks.emit('before_turn', hooks.HookCtx(
+                point='before_turn', gid=gid, cfg=cfg, turn_id=turn_id,
+                actor_role=role))
+            if v.block:
+                self._live('hook_block', gid, parsed.chat_type, turn_id,
+                           point='before_turn', reason=v.block)
+                self.log(f'群 {gid} before_turn hook 拦截: {v.block}', 'warn')
+                return {'final_text': '', 'silent': True,
+                        'sent_texts': set()}
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
         self._live('turn_start', gid, parsed.chat_type, turn_id,
                    source=source_kind, background=bool(background),
                    forced=bool(forced),
                    sender_id=str(parsed.sender_id or ''),
                    sender_name=parsed.display_name,
-                   text=self._user_display_text(parsed))
+                   text=self._user_display_text(parsed, name_cache))
         persona = resolve_persona(cfg, storage.get_group(self.p.db_path, gid)
                                   .get('persona', ''))
         phash = ctx_mod.persona_hash(persona)
@@ -741,7 +920,8 @@ class Engine:
                     'style_header', store, content=style_text)
         task_block = ''
         if self.p.tasks is not None:
-            task_block = self.p.tasks.open_block(gid, participants)
+            # P0-1：open_block 是同步 DAL，丢线程池跑，不占事件循环
+            task_block = await self.p.tasks.open_block(gid, participants)
 
         # 2c) AI 自我提示词注入（学到技能/沉淀素材后自己写下的每轮提醒）
         inject_block = ''
@@ -754,14 +934,16 @@ class Engine:
                 self.log(f'提示词注入读取失败（本轮跳过）: {e}', 'warn')
 
         # 3) 工具集（先于系统提示词：has_mcp 决定是否注入媒体发送说明）
-        tools, enabled_mcp, enabled_custom = self._build_tools(gid, cfg)
+        tools, enabled_mcp, enabled_custom = self._build_tools(
+            gid, cfg, deny_tools)
         # 工具目录只按"本群实际启用"的工具名生成（随群工具开关/自定义工具增减）
         custom_items = [
             (k, r.get('description', ''), bool(r.get('owner_only_call')))
             for k, r in enabled_custom.items()]
         catalog = prompts_mod.build_catalog(
             {t['function']['name'] for t in tools},
-            custom_items, bool(enabled_mcp))
+            custom_items, bool(enabled_mcp),
+            privileged=bool(cfg.get('privileged_tools_on')))
 
         # 4) 组装消息。系统提示词只放跨轮稳定块：记忆/风格/约定/注入这些
         # 每轮随发言人变化的块统一挪到历史之后的 LIVE_CTX 尾部块，避免它们
@@ -838,7 +1020,8 @@ class Engine:
                 and cfg.get('meme_guide_on', True)):
             try:
                 live_parts.append(meme_guide.injection_block(
-                    self._user_display_text(parsed), cfg, store=store))
+                    self._user_display_text(parsed, name_cache), cfg,
+                    store=store))
             except Exception as e:
                 self.log(f'梗指南匹配失败（本轮跳过）: {e}', 'warn')
         live_text = '\n\n'.join(p.strip() for p in live_parts
@@ -896,6 +1079,12 @@ class Engine:
             quote_state=quote_state,
             pctx=pctx,
             sender_id=ctx_sender_id, sender_name=ctx_sender_name)
+        # N-04：把子代理 runner 挂到 tool_ctx，供 builtin_tools.subagent_task 使用
+        try:
+            tool_ctx.subagent = self.subagent
+            tool_ctx.turn_id = turn_id
+        except Exception:
+            pass
 
         # 5) 工具循环。本轮注册为「可打断活动轮」：/ai 打断 投来的群友消息
         # 在每次请求模型前的安全点注入，可临时调整执行中的任务
@@ -911,10 +1100,12 @@ class Engine:
                 gid, cfg, parsed, messages, tool_ctx, tools,
                 enabled_mcp, enabled_custom, max_rounds,
                 trace=trace, token=turn_token, sent_texts=sent_texts,
-                persona=persona, loop_ctx=loop_ctx, turn_id=turn_id)
+                persona=persona, loop_ctx=loop_ctx, turn_id=turn_id,
+                deny_tools=deny_tools, at_cache=at_cache)
             final_text, silent = await self._emit_final(
                 gid, cfg, parsed, final_text, sent_texts, turn_id=turn_id,
-                quote_state=quote_state, pctx=pctx)
+                quote_state=quote_state, pctx=pctx, messages=messages,
+                at_cache=at_cache)
 
             # 收尾回复期间才到达的插队：同轮内再处理几波，让临时调整立即生效，
             # 而不是等下一轮对话才被看到
@@ -932,10 +1123,15 @@ class Engine:
                     gid, cfg, parsed, messages, tool_ctx, tools,
                     enabled_mcp, enabled_custom, max_rounds,
                     trace=trace, token=turn_token, sent_texts=sent_texts,
-                    persona=persona, loop_ctx=loop_ctx, turn_id=turn_id)
-                final_text, silent = await self._emit_final(
+                    persona=persona, loop_ctx=loop_ctx, turn_id=turn_id,
+                    deny_tools=deny_tools, at_cache=at_cache)
+                cont_text, cont_silent = await self._emit_final(
                     gid, cfg, parsed, extra, sent_texts, turn_id=turn_id,
-                    quote_state=quote_state, pctx=pctx)
+                    quote_state=quote_state, pctx=pctx, messages=messages,
+                    at_cache=at_cache)
+                # 续轮正文为空时不能覆盖本轮已经发出去的 final_text
+                if cont_text.strip():
+                    final_text, silent = cont_text, cont_silent
         finally:
             # 极窄竞态：最终收尾后又有插队到达、宽限波次已用尽。落库保留，
             # 下一轮前台对话能看到这条真人消息（不会凭空丢失）
@@ -957,10 +1153,14 @@ class Engine:
                 self.p.memory.schedule_extraction(gid, cfg, self.p.llm)
             if self.p.style and cfg.get('learn_style_on', True):
                 self.p.style.schedule_check(gid, cfg, self.p.llm)
-            # 心情判定：每轮一次便宜模型调用，结果只影响下一轮
-            if mood_mgr is not None and cfg.get('mood_on', True):
+            # 心情判定：一次便宜模型调用，结果只影响下一轮；P0-6 按
+            # mood_every_rounds 降频（首轮必跑，避免开局没有心情数据）
+            if (mood_mgr is not None and cfg.get('mood_on', True)
+                    and self._mood_due(
+                        gid, int(cfg.get('mood_every_rounds', 3) or 3))):
                 trigger_text = (parsed.text if (background or raw_bg_notice)
-                                else self._user_display_text(parsed))
+                                else self._user_display_text(
+                                    parsed, name_cache))
                 try:
                     mood_mgr.schedule_judge(
                         gid, cfg, self.p.llm, source_kind=source_kind,
@@ -982,7 +1182,8 @@ class Engine:
                          enabled_mcp, enabled_custom, max_rounds, *,
                          trace, token, sent_texts,
                          persona: str = '', loop_ctx: dict | None = None,
-                         turn_id: str = '') -> str:
+                         turn_id: str = '', deny_tools=frozenset(),
+                         at_cache: dict | None = None) -> str:
         """请求模型 → 派发工具的循环，直到模型给出无工具调用的终态文案。
 
         每轮请求模型前在安全点取走插队消息（/ai 打断），让群友能临时调整
@@ -1041,13 +1242,16 @@ class Engine:
                         self.log(f'群 {gid} 请求撞上上下文上限，已强制压缩后'
                                  f'重试（第 {compact_retries} 次）', 'warn')
                         continue
-                storage.add_usage(self.p.db_path,
-                                  {'group_id': gid, 'kind': 'chat', 'ok': False})
+                await asyncio.to_thread(
+                    storage.add_usage, self.p.db_path,
+                    {'group_id': gid, 'kind': 'chat', 'ok': False})
                 raise
             compact_retries = 0
-            storage.add_usage(self.p.db_path, {
-                'group_id': gid, 'kind': 'chat', 'tool_rounds': rounds,
-                'ok': True, **result.usage})
+            # P0-1：usage 落库是同步 sqlite 写，丢线程池
+            await asyncio.to_thread(
+                storage.add_usage, self.p.db_path, {
+                    'group_id': gid, 'kind': 'chat', 'tool_rounds': rounds,
+                    'ok': True, **result.usage})
             # 记住这次请求的真实 prompt token + 当时体量，供下一轮安全点外推
             # （系统提示词/工具 schema 等固定成本都在真实值里，比字符估算准）
             if loop_ctx is not None:
@@ -1091,16 +1295,18 @@ class Engine:
                              'content': interim or None,
                              'tool_calls': wire}
             messages.append(assistant_msg)
-            storage.insert_message(self.p.db_path, gid, 'assistant', interim,
-                                   tool_calls=wire)
+            # P0-1：interim 落库同步 sqlite 写，丢线程池（参数全是纯数据）
+            await asyncio.to_thread(
+                storage.insert_message, self.p.db_path, gid, 'assistant',
+                interim, tool_calls=wire)
 
             if interim:
                 try:
-                    at_map = await self._at_map(gid, cfg, interim)
+                    at_map = await self._at_map(gid, cfg, interim, at_cache)
                     n = await reply.send_in_chunks(
                         self.p.bot, gid, interim, cfg,
                         message_type=parsed.chat_type, name_map=at_map,
-                        quote_id=reply.take_quote(tool_ctx.quote_state),
+                        quote_state=tool_ctx.quote_state,
                         pctx=tool_ctx.pctx)
                 except asyncio.CancelledError:
                     # assistant(tool_calls) 行已落库：补齐占位结果再退出，
@@ -1113,7 +1319,8 @@ class Engine:
                     self.log(f'群 {gid} 工具轮{rounds} 插话发送失败'
                              f'（继续执行工具）: {e}', 'warn')
                     n = 0
-                sent_texts.add(interim)
+                if n > 0:
+                    sent_texts.add(interim)
                 self.log(f'群 {gid} 工具轮{rounds} 模型插话 {n} 条：'
                          f'{self._clip(interim, 120)}', 'ok')
                 if trace is not None:
@@ -1123,16 +1330,24 @@ class Engine:
                            text=interim, phase='interim', n_chunks=n)
 
             answered: set[str] = set()
-            for norm in result.tool_calls:
+
+            async def _exec_one(norm):
                 call_id = str(norm.get('id') or '')
                 tool_name = norm.get('name') or ''
                 tool_args = self._clip(
                     json.dumps(norm.get('arguments') or {},
                                ensure_ascii=False), 300)
                 try:
-                    content = await self._dispatch(
-                        tool_name, norm.get('arguments') or {}, tool_ctx,
-                        cfg, enabled_mcp, enabled_custom)
+                    if builtin_tools.TOOL_KEYS.get(tool_name, tool_name) \
+                            in deny_tools:
+                        # 场景级禁用：不进 dispatch（不写库、不发消息），只回一条
+                        # 错误文本让模型自己改道
+                        content = (f'错误: 当前场景不允许调用 {tool_name}'
+                                   '（空间知会轮只能读取、评论、点赞）')
+                    else:
+                        content = await self._dispatch(
+                            tool_name, norm.get('arguments') or {}, tool_ctx,
+                            cfg, enabled_mcp, enabled_custom)
                     # read_image 返回多模态结果：当轮 tool 消息带图片回传视觉，
                     # 落库/日志只存文字说明，历史窗不携带 base64
                     if isinstance(content, builtin_tools.ToolMediaResult):
@@ -1154,8 +1369,11 @@ class Engine:
                                ok=not str(note).startswith('错误'),
                                result=str(note))
                 except asyncio.CancelledError:
-                    self._fill_missing_tool_results(
-                        gid, messages, wire, answered, '本轮被中止')
+                    # 这里不能补占位 tool 行：批调度超时会 cancel 单个 task，
+                    # 而 run_batch 随后会正常返回（超时项已填 '[工具超时]'），
+                    # 此时补写会与本轮末尾的统一 append 产生重复 tool_call_id。
+                    # 只有整轮被取消才需要补齐，那由 run_batch 外层
+                    # except CancelledError 统一处理（那里能看到已落库的行）。
                     raise
                 except Exception as e:
                     # 兜底：一个工具出错只影响它自己，其余调用和后续轮次照常
@@ -1163,6 +1381,28 @@ class Engine:
                              'error')
                     note = tool_content = \
                         f'错误: 工具 {tool_name} 执行异常: {e}'
+
+                return call_id, tool_name, note, tool_content
+
+            try:
+                batch = await tool_batch.run_batch(
+                    _exec_one, list(result.tool_calls), cfg=cfg, gid=gid)
+            except asyncio.CancelledError:
+                done = {m.get('tool_call_id') for m in messages
+                        if m.get('role') == 'tool'}
+                self._fill_missing_tool_results(
+                    gid, messages, wire, done, '本轮被中止')
+                raise
+            self._live('tool_batch', gid, parsed.chat_type, turn_id,
+                       parallel_groups=batch.parallel_groups,
+                       calls=len(batch.results), wall_ms=batch.wall_ms)
+            for norm, payload in batch.results:
+                if isinstance(payload, tuple) and len(payload) == 4:
+                    call_id, tool_name, note, tool_content = payload
+                else:
+                    call_id = str(norm.get('id') or '')
+                    tool_name = norm.get('name') or ''
+                    note = tool_content = str(payload)
                 messages.append({'role': 'tool', 'tool_call_id': call_id,
                                  'content': tool_content})
                 answered.add(call_id)
@@ -1171,8 +1411,6 @@ class Engine:
                         self.p.db_path, gid, 'tool', note,
                         tool_call_id=call_id, name=tool_name)
                 except Exception as e:
-                    # 落库失败不影响本轮（内存序列完整）；历史残缺由
-                    # context._repair_tool_chains 在下一轮请求前修复
                     self.log(f'群 {gid} 工具结果落库失败: {e}', 'warn')
 
             if loop_ctx is not None:
@@ -1190,7 +1428,7 @@ class Engine:
                 if loop_ctx['since_spoke'] >= every:
                     await self._force_loop_speech(
                         gid, cfg, parsed, messages, tool_ctx, trace, loop_ctx,
-                        turn_id=turn_id)
+                        turn_id=turn_id, at_cache=at_cache)
                     loop_ctx['since_spoke'] = 0
             elif rounds >= max_rounds:
                 # 硬上限：摘掉工具，明令只用一句话收尾，避免群里静默
@@ -1210,11 +1448,11 @@ class Engine:
                     # 对外表现为这轮彻底没回音）
                     self.log(f'群 {gid} 工具轮次达上限后收尾请求失败: {e}',
                              'error')
-                    storage.add_usage(self.p.db_path, {
+                    await asyncio.to_thread(storage.add_usage, self.p.db_path, {
                         'group_id': gid, 'kind': 'chat',
                         'tool_rounds': rounds, 'ok': False})
                     return '（这轮操作步数到上限了，要我继续就说一声）'
-                storage.add_usage(self.p.db_path, {
+                await asyncio.to_thread(storage.add_usage, self.p.db_path, {
                     'group_id': gid, 'kind': 'chat', 'tool_rounds': rounds,
                     'ok': True, **final_close.usage})
                 self._log_model_output(gid, final_close, rounds)
@@ -1242,7 +1480,8 @@ class Engine:
     # ── loop 长跑：强制汇报 + 上下文压缩 ────────────────────────
 
     async def _force_loop_speech(self, gid, cfg, parsed, messages, tool_ctx,
-                                 trace, loop_ctx, turn_id: str = '') -> None:
+                                 trace, loop_ctx, turn_id: str = '',
+                                 at_cache: dict | None = None) -> None:
         """连续 N 个工具轮没在群里说话：摘工具强制她汇报一句，说完继续循环。"""
         n = loop_ctx.get('since_spoke', 0)
         directive = (
@@ -1260,7 +1499,7 @@ class Engine:
                 self.log(f'群 {gid} 长跑强制汇报请求失败（跳过本次，'
                          f'继续任务）: {e}', 'error')
                 return
-            storage.add_usage(self.p.db_path, {
+            await asyncio.to_thread(storage.add_usage, self.p.db_path, {
                 'group_id': gid, 'kind': 'chat',
                 'tool_rounds': loop_ctx.get('total_rounds', 0),
                 'ok': True, **close.usage})
@@ -1284,15 +1523,21 @@ class Engine:
         if not text.strip():
             self.log(f'群 {gid} 长跑强制汇报为空，本次跳过', 'warn')
             return
-        at_map = await self._at_map(gid, cfg, text)
-        n_sent = await reply.send_in_chunks(
-            self.p.bot, gid, text, cfg,
-            message_type=parsed.chat_type, name_map=at_map,
-            quote_id=reply.take_quote(tool_ctx.quote_state),
-            pctx=tool_ctx.pctx)
-        messages.append({'role': 'assistant', 'content': text})
-        storage.insert_message(self.p.db_path, gid, 'assistant', text)
-        tool_ctx.sent_texts.add(text)
+        at_map = await self._at_map(gid, cfg, text, at_cache)
+        try:
+            n_sent = await reply.send_in_chunks(
+                self.p.bot, gid, text, cfg,
+                message_type=parsed.chat_type, name_map=at_map,
+                quote_state=tool_ctx.quote_state,
+                pctx=tool_ctx.pctx)
+        except Exception as e:
+            # 同 LLM 失败口径：汇报发不出去只记录，不能终止整个长跑
+            self.log(f'群 {gid} 长跑强制汇报发送失败（继续任务）: {e}', 'warn')
+            return
+        if n_sent > 0:
+            messages.append({'role': 'assistant', 'content': text})
+            storage.insert_message(self.p.db_path, gid, 'assistant', text)
+            tool_ctx.sent_texts.add(text)
         self.log(f'群 {gid} 长跑强制汇报 {n_sent} 条：{self._clip(text, 120)}',
                  'ok')
         if trace is not None:
@@ -1314,7 +1559,7 @@ class Engine:
                         total += 1500 if p.get('type') == 'image_url' \
                             else len(str(p.get('text', '')))
             for tc in (m.get('tool_calls') or []):
-                total += len(json.dumps(tc, ensure_ascii=False))
+                total += _tool_call_weight(tc)
         return total
 
     @staticmethod
@@ -1468,7 +1713,7 @@ class Engine:
                        '未完成事项、下一步计划、关键 ID/文件名/群友 QQ。')
             note, usage = await self.p.llm.summarize(
                 cfg, persona, loop_ctx.get('compact_note', ''), script[-12000:])
-            storage.add_usage(self.p.db_path,
+            await asyncio.to_thread(storage.add_usage, self.p.db_path,
                               {'group_id': gid, 'kind': 'summary',
                                'ok': True, **usage})
             note = (note or '').strip()
@@ -1509,7 +1754,8 @@ class Engine:
     async def _emit_final(self, gid, cfg, parsed, final_text: str,
                           sent_texts: set, turn_id: str = '',
                           quote_state: dict | None = None,
-                          pctx=None) -> tuple[str, bool]:
+                          pctx=None, messages: list | None = None,
+                          at_cache: dict | None = None) -> tuple[str, bool]:
         """[nospeak] 内心戏剥离 + 终态去重 + 分条发送 + 落库。
 
         返回 (实际正文, 是否静默)。插队触发的续轮共用同一套终态处理；
@@ -1529,15 +1775,20 @@ class Engine:
         if silent:
             self.log(f'群 {gid} 定时苏醒轮模型选择静默，不发群不入库', 'ok')
         elif final_text and final_text not in sent_texts:
-            at_map = await self._at_map(gid, cfg, final_text)
+            at_map = await self._at_map(gid, cfg, final_text, at_cache)
             n = await reply.send_in_chunks(
                 self.p.bot, gid, final_text, cfg,
                 message_type=parsed.chat_type, name_map=at_map,
-                quote_id=reply.take_quote(quote_state),
+                quote_state=quote_state,
                 pctx=pctx)
-            storage.insert_message(self.p.db_path, gid, 'assistant',
-                                   final_text)
-            sent_texts.add(final_text)
+            if n > 0:
+                storage.insert_message(self.p.db_path, gid, 'assistant',
+                                       final_text)
+                sent_texts.add(final_text)
+                # 续轮/插队处理时模型要能看到自己刚说的话（否则会重复汇报）
+                if messages is not None:
+                    messages.append({'role': 'assistant',
+                                     'content': final_text})
             self.log(f'群 {gid} 回复 {n} 条')
             self._live('assistant_send', gid, parsed.chat_type, turn_id,
                        text=final_text, phase='final', n_chunks=n)
@@ -1565,14 +1816,17 @@ class Engine:
         if cfg.get('summary_mode') == 'tail':
             return await self._prepare_tail(gid, cfg)
 
-        summary_row = storage.get_summary(self.p.db_path, gid)
+        # P0-1：摘要/历史读取是同步 sqlite 查，丢线程池
+        summary_row = await asyncio.to_thread(
+            storage.get_summary, self.p.db_path, gid)
         old_summary = (summary_row or {}).get('summary') or ''
         up_to = int((summary_row or {}).get('covered_up_to_id') or 0)
         if summary_row and summary_row.get('persona_hash') != phash:
             return await self._rebuild_summary(
                 gid, cfg, persona, phash, old_summary, up_to)
 
-        rows = storage.messages_since(self.p.db_path, gid, up_to)
+        rows = await asyncio.to_thread(
+            storage.messages_since, self.p.db_path, gid, up_to)
         plan = ctx_mod.plan_summary(
             rows,
             int(cfg.get('window_rounds', 12)),
@@ -1602,10 +1856,11 @@ class Engine:
                                        new_up_to, phash):
             self.log(f'群 {gid} 摘要锚点已被更新（竞争落败），'
                      '按库内权威锚点重建窗口', 'warn')
-            fresh = storage.get_summary(self.p.db_path, gid) or {}
+            fresh = await asyncio.to_thread(
+                storage.get_summary, self.p.db_path, gid) or {}
             fresh_up_to = int(fresh.get('covered_up_to_id') or 0)
-            fresh_rows = storage.messages_since(
-                self.p.db_path, gid, fresh_up_to)
+            fresh_rows = await asyncio.to_thread(
+                storage.messages_since, self.p.db_path, gid, fresh_up_to)
             fresh_win = ctx_mod.select_window(
                 fresh_rows,
                 int(cfg.get('window_rounds', 12)),
@@ -1619,9 +1874,11 @@ class Engine:
         机械前移锚点，只保留尾部消息。库内旧摘要文本保留不删，切回摘要
         模式时还能滚动续用。
         """
-        summary_row = storage.get_summary(self.p.db_path, gid) or {}
+        summary_row = await asyncio.to_thread(
+            storage.get_summary, self.p.db_path, gid) or {}
         up_to = int(summary_row.get('covered_up_to_id') or 0)
-        rows = storage.messages_since(self.p.db_path, gid, up_to)
+        rows = await asyncio.to_thread(
+            storage.messages_since, self.p.db_path, gid, up_to)
         plan = ctx_mod.plan_tail(
             rows, int(cfg.get('tail_keep_msgs', 30)),
             int(cfg.get('char_budget', 6000)))
@@ -1638,7 +1895,8 @@ class Engine:
 
         摘要失败时不更新人设哈希，下一轮仍会重试。
         """
-        rows = storage.messages_since(self.p.db_path, gid, up_to)
+        rows = await asyncio.to_thread(
+            storage.messages_since, self.p.db_path, gid, up_to)
         force_msgs = int(cfg.get('summary_force_msgs', 48))
         force_chars = int(cfg.get('summary_force_chars', 12000))
         window = rows
@@ -1651,9 +1909,12 @@ class Engine:
             if window:
                 covered = int(window[0]['id']) - 1
         cutoff = int(window[0]['id']) if window else 10**18
-        old_rows = [r for r in storage.messages_after(
-            self.p.db_path, gid, 0, 10**6)
-            if r['id'] < cutoff and r['content']][-60:]
+        # P1-2：原来拉全历史（10**6 行上限）再内存过滤，长跑一年会卡事件循环；
+        # 改为只取 id<cutoff 的最近 200 条（分页），再取其中最后 60 条
+        before = await asyncio.to_thread(
+            storage.messages_before, self.p.db_path, gid, cutoff, 200,
+            roles=('user', 'assistant'))
+        old_rows = [r for r in before if r.get('content')][-60:]
         script = ctx_mod.render_script(old_rows)
         if not script and not old_summary:
             storage.set_summary(self.p.db_path, gid, '', covered, phash)
@@ -1676,18 +1937,18 @@ class Engine:
         try:
             text, usage = await self.p.llm.summarize(
                 cfg, persona, old_summary, script)
-            storage.add_usage(self.p.db_path, {
+            await asyncio.to_thread(storage.add_usage, self.p.db_path, {
                 'group_id': gid, 'kind': 'summary', 'ok': True, **usage})
         except Exception as e:
             self.log(f'摘要失败（本轮跳过）: {e}', 'warn')
-            storage.add_usage(self.p.db_path,
+            await asyncio.to_thread(storage.add_usage, self.p.db_path,
                               {'group_id': gid, 'kind': 'summary', 'ok': False})
             return None
         return text
 
     # ── 工具 ────────────────────────────────────────────────────
 
-    def _build_tools(self, gid: str, cfg: dict):
+    def _build_tools(self, gid: str, cfg: dict, deny=frozenset()):
         overrides = storage.get_tool_overrides(self.p.db_path, gid)
         enabled_keys = set(_ALL_TOOL_KEYS)
         enabled_mcp = {}
@@ -1709,6 +1970,10 @@ class Engine:
         # 被群开关关掉的 MCP 工具同时从 schema 与 dispatch 映射里摘除：
         # 模型既看不到，硬调（幻觉/上一轮缓存的工具名）也会落到「工具不可用」
         enabled_mcp = {k: v for k, v in enabled_mcp.items() if k in enabled_keys}
+        # 本场景禁用（如空间知会轮禁发/删说说）：schema 与提示词目录都不出现，
+        # dispatch 里再兜一层，防模型按上一轮缓存的工具名硬调
+        if deny:
+            enabled_keys -= set(deny)
         if not cfg.get('memory_on', True):
             enabled_keys.discard('memory.recall')
             enabled_keys.discard('memory.remember')
@@ -1724,6 +1989,13 @@ class Engine:
             enabled_keys.discard('meme.lookup')
         if not cfg.get('read_video_on', True):
             enabled_keys.discard('fs.read_video')
+        # QQ 空间工具只在通道可用时暴露：official 通道没有空间接口，老版
+        # NapCat 也没有 get_qzone_* action，暴露出去只会让模型白调一次。
+        # （能力由 qzone.refresh() 探测，结果缓存；不可用时提示词里也不会出现）
+        qz = getattr(self.p, 'qzone', None)
+        if qz is not None and not qz.available():
+            for k in [k for k in enabled_keys if str(k).startswith('qzone.')]:
+                enabled_keys.discard(k)
 
         # AI 自定义工具：本群 + 全局，本群同名覆盖全局（SQL 已按全局在前排序）；
         # 群工具开关（overrides）也能按 custom__<name> 关闭
@@ -1750,23 +2022,90 @@ class Engine:
                 'parameters': params}})
         return schemas, enabled_mcp, enabled_custom
 
-    def _risk_denied(self, name: str, tool_ctx, cfg: dict):
-        """非主人指令风险操作时返回拒绝文案；允许则返回 None。"""
-        if not cfg.get('risky_owner_only', True) or tool_ctx.is_owner:
-            return None
-        risky = False
+    @staticmethod
+    def _actor_role(tool_ctx) -> str:
+        """调用者安全角色：owner / readonly（子代理）/ member。
+
+        ToolContext.actor_role 显式给了就用（子代理传 'readonly'）；
+        否则按 sender_id 是否等于 owner_qq 推断。
+        """
+        if getattr(tool_ctx, 'is_owner', False):
+            return 'owner'
+        role = str(getattr(tool_ctx, 'actor_role', '') or '')
+        if role in ('owner', 'admin', 'member', 'readonly'):
+            return role
+        return 'member'
+
+    async def _risk_denied(self, name: str, tool_ctx, cfg: dict):
+        """风险工具门禁：N-02 权限引擎 + N-03 审批中心。
+
+        返回 None 表示放行，返回字符串表示拒绝文案（调用方直接回灌模型）。
+        """
+        tool_key = ''
         if builtin_tools.is_builtin(name):
-            risky = builtin_tools.TOOL_KEYS.get(name) in builtin_tools.RISKY_TOOL_KEYS
-        elif name.startswith('mcp__'):
-            risky = True   # MCP 工具 = 远程桌面读写/操控，整体视为风险
-        if not risky:
+            tool_key = builtin_tools.TOOL_KEYS.get(name, name)
+        else:
+            tool_key = str(name)
+        role = self._actor_role(tool_ctx)
+        self.permissions.refresh(cfg)
+        # 子代理的额外授权工具（主人配置 subagent_extra_tools）：MCP 浏览器
+        # 工具、自定义工具等。命中即放行，并且跳过权限引擎——这些工具按
+        # 风险归类（mcp__ 一律风险、自定义工具任意代码），只有主人的显式
+        # 授权名单能通过。名单为空时行为与「纯只读子代理」完全一致。
+        allow_tools = getattr(tool_ctx, 'allow_tools', None) or ()
+        if role == 'readonly' and allow_tools and \
+                tool_batch.matched_any(allow_tools, name, tool_key):
             return None
-        owner = str(cfg.get('owner_qq', '') or '')
-        return (f'错误: 这属于风险操作（写/追加/删除工作区或 public 公共素材库'
-                f'文件、沉淀素材 fs_publish、在本机执行代码/命令、'
-                f'发布/修改自定义工具或初筛脚本，或操控远程桌面），'
-                f'只有主人（QQ {owner}）才能指令。请拒绝对方并说明：'
-                f'需要主人本人确认后我才能执行，不要尝试绕过。')
+        # 只读身份（子代理）的防御纵深：即使权限配置被改坏（例如给
+        # readonly 写了 allow 规则 / 规则写错），非只读工具也不许过。
+        if role == 'readonly' and \
+                not perms_mod.PermissionEngine.is_readonly_tool(tool_key):
+            self.log(f'群 {tool_ctx.group_id} 只读身份尝试调用非只读工具 '
+                     f'{name}，已拦截', 'warn')
+            return ('[拒绝] 子代理是只读身份，只能调用只读工具（读文件、查历史、'
+                    '看空间等）；写/发送类操作需要主人本人在对话里直接指令。')
+        decision = self.permissions.decide(
+            tool_key=tool_key, args=getattr(tool_ctx, 'last_args', None) or {},
+            actor_role=role, gid=str(tool_ctx.group_id),
+            chat_type=getattr(tool_ctx, 'chat_type', 'group'))
+        if decision.action == 'allow':
+            # AI 自主执行模式留痕：非主人驱动的风险工具是一条可审计记录
+            # （群消息可被提示词注入，出事时靠这行日志定位是谁触发、哪个群）。
+            if cfg.get('privileged_tools_on') and role != 'owner':
+                try:
+                    self.log(
+                        f'[权限] 群 {tool_ctx.group_id} 成员 '
+                        f'{getattr(tool_ctx, "sender_id", "") or "?"} 以 AI 自主执行'
+                        f'模式调用风险工具 {tool_key}（{decision.reason}）', 'warn')
+                except Exception:
+                    pass
+            return None
+        if decision.action == 'deny':
+            if role == 'readonly':
+                return ('[拒绝] 子代理只能调用只读工具；'
+                        f'{tool_key} 属于写/发送类操作。')
+            owner = str(cfg.get('owner_qq', '') or '')
+            reason = decision.reason or '该操作仅限主人'
+            return (f'错误: 这属于风险操作（写/追加/删除工作区或 public 公共素材库'
+                    f'文件、沉淀素材 fs_publish、在本机执行代码/命令、'
+                    f'发布/修改自定义工具或初筛脚本，或操控远程桌面）。'
+                    f'{reason}，只有主人（QQ {owner}）才能指令。请拒绝对方并说明：'
+                    f'需要主人本人确认后我才能执行，不要尝试绕过。')
+        approved = await self.approvals.request(
+            gid=str(tool_ctx.group_id),
+            chat_type=getattr(tool_ctx, 'chat_type', 'group'),
+            tool_key=tool_key, args=getattr(tool_ctx, 'last_args', None) or {},
+            actor=str(getattr(tool_ctx, 'sender_id', '') or ''),
+            turn_id=str(getattr(tool_ctx, 'turn_id', '') or ''))
+        if approved:
+            return None
+        return '[拒绝] 审批未通过（拒绝或超时）'
+
+    def _approval_count_today(self, tool_key: str, args: dict) -> int:
+        try:
+            return storage.count_approvals_today(self.p.db_path, tool_key)
+        except Exception:
+            return 0
 
     def _fill_missing_tool_results(self, gid, messages, wire, answered,
                                    reason: str) -> None:
@@ -1799,18 +2138,52 @@ class Engine:
         补齐未执行的 tool 结果后再退出，避免历史里留下残缺调用链。
         """
         try:
-            return await self._dispatch_impl(
+            tool_ctx.last_args = args
+        except Exception:
+            pass
+        ctx = hooks.HookCtx(
+            point='before_tool', gid=str(tool_ctx.group_id), cfg=cfg,
+            turn_id=str(getattr(tool_ctx, 'turn_id', '') or ''),
+            tool_key=name, args=args,
+            actor_role=self._actor_role(tool_ctx))
+        try:
+            verdict = await hooks.emit('before_tool', ctx)
+            if verdict.block:
+                self._live('hook_block', str(tool_ctx.group_id),
+                           getattr(tool_ctx, 'chat_type', 'group'),
+                           ctx.turn_id, point='before_tool',
+                           tool_key=name, reason=verdict.block)
+                return f'错误: {verdict.block}'
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
+        try:
+            out = await self._dispatch_impl(
                 name, args, tool_ctx, cfg, enabled_mcp, enabled_custom)
         except asyncio.CancelledError:
             raise
         except Exception as e:
             self.log(f'群 {tool_ctx.group_id} 工具 {name} 派发异常: {e}',
                      'error')
-            return f'错误: 工具 {name} 执行异常: {e}'
+            out = f'错误: 工具 {name} 执行异常: {e}'
+        try:
+            after = hooks.HookCtx(
+                point='after_tool', gid=str(tool_ctx.group_id), cfg=cfg,
+                turn_id=ctx.turn_id, tool_key=name, args=args,
+                result=str(out), actor_role=ctx.actor_role)
+            v2 = await hooks.emit('after_tool', after)
+            if v2.mutate and 'result' in v2.mutate:
+                out = v2.mutate['result']
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
+        return out
 
     async def _dispatch_impl(self, name: str, args: dict, tool_ctx, cfg,
                              enabled_mcp, enabled_custom=None) -> str:
-        denied = self._risk_denied(name, tool_ctx, cfg)
+        denied = await self._risk_denied(name, tool_ctx, cfg)
         if denied:
             self.log(f'群 {tool_ctx.group_id} 非主人 {tool_ctx.sender_id} '
                      f'尝试风险工具 {name} 已拦截', 'warn')
@@ -1844,7 +2217,8 @@ class Engine:
         if name.startswith('custom__') and enabled_custom and \
                 name in enabled_custom:
             row = enabled_custom[name]
-            if row.get('owner_only_call') and not tool_ctx.is_owner:
+            if row.get('owner_only_call') and not tool_ctx.is_owner \
+                    and not cfg.get('privileged_tools_on'):
                 self.log(f'群 {tool_ctx.group_id} 非主人 {tool_ctx.sender_id} '
                          f'尝试主人专属自定义工具 {name}，已拦截', 'warn')
                 return '错误: 这个自定义工具被发布者标记为仅主人可触发'
@@ -1892,6 +2266,16 @@ class Engine:
             parts.append(prompts_mod.render(
                 'tools_guide', store,
                 catalog=catalog, owner_qq=cfg.get('owner_qq', '')))
+        if has_tools and cfg.get('privileged_tools_on'):
+            # AI 自主执行模式：把"风险工具只听主人"改成"你自己判断后可以执行"，
+            # 否则模型会照着默认提示词拒绝群里成员的要求（门禁已经放行了）。
+            parts.append(
+                '【当前权限模式：AI 自主执行】本次会话已开启自主执行模式：'
+                '上面工具目录里标注为风险的操作（在工作区读写/删除文件、'
+                '执行代码或命令、发布或删除说说、@全体成员等）不再要求指令者'
+                '是主人，你可以根据上下文自行判断后直接执行。'
+                '但发到群里、发到空间等不可撤销的外发操作仍要克制：'
+                '先想清楚再动手，拿不准就先说明你打算做什么。')
         if has_tools and has_mcp:
             parts.append(prompts_mod.render('mcp_rules', store))
         return {'role': 'system', 'content': '\n\n'.join(p for p in parts if p)}

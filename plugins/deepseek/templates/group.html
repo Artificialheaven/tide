@@ -1,35 +1,7 @@
-<!doctype html>
-<html lang="zh-CN">
-<head>
-<meta charset="utf-8">
-<title>DeepSeek 群AI · 群设置</title>
-<style>
-body{background:#1a1d23;color:#d7dae0;font:14px/1.6 "Microsoft YaHei",sans-serif;margin:0}
-nav{background:#22262e;padding:10px 20px;border-bottom:1px solid #333}
-nav a{color:#7aa2f7;margin-right:16px;text-decoration:none}
-.wrap{padding:20px;max-width:820px;margin:auto}
-fieldset{border:1px solid #333;border-radius:6px;margin-bottom:16px;padding:12px 16px}
-legend{color:#8b93a7;padding:0 6px}
-label{display:block;margin:8px 0}
-input,select,textarea{background:#22262e;color:#eceff4;border:1px solid #3b4252;border-radius:4px;padding:6px 8px;width:320px;box-sizing:border-box}
-textarea{width:100%;height:120px}
-input[type=checkbox]{width:auto;margin-right:6px}
-button{background:#5e81ac;color:#fff;border:0;border-radius:4px;padding:7px 16px;cursor:pointer;margin-right:8px}
-.hint{color:#6b7280;font-size:12px}
-.tool label{display:inline-block;width:280px}
-</style>
-</head>
-<body>
-<nav>
-  <a href="/deepseek/dashboard?v={{ PLUGIN_VERSION }}">群开关</a>
-  <a href="/deepseek/settings?v={{ PLUGIN_VERSION }}">全局设置</a>
-  <a href="/deepseek/mcp?v={{ PLUGIN_VERSION }}">MCP 工具</a>
-  <a href="/deepseek/memory?v={{ PLUGIN_VERSION }}">群友记忆</a>
-  <a href="/deepseek/runs?v={{ PLUGIN_VERSION }}">后台/轮询</a>
-  <a href="/deepseek/prompts?v={{ PLUGIN_VERSION }}">提示词</a>
-  <a href="/deepseek/live?v={{ PLUGIN_VERSION }}">B站直播</a>
-  <span class="hint" style="float:right">v{{ PLUGIN_VERSION }}</span>
-</nav>
+{% extends "base.html" %}
+{% block title %}群设置 · 大肥鱼{% endblock %}
+{% block page_title %}群设置{% endblock %}
+{% block content %}
 <div class="wrap">
 <h2>群设置 <input id="gidbox" style="width:140px" placeholder="群号">
 <button onclick="loadGroup()" type="button">加载</button>
@@ -47,6 +19,7 @@ button{background:#5e81ac;color:#fff;border:0;border-radius:4px;padding:7px 16px
   <label>仅@触发 <select name="at_only_on"><option value="">继承全局</option><option value="true">开</option><option value="false">关</option></select></label>
   <label>引用回复 <select name="quote_reply_on"><option value="">继承全局</option><option value="true">开</option><option value="false">关</option></select></label>
   <label>分条发送 <select name="split_reply"><option value="">继承全局</option><option value="true">强制开</option><option value="false">强制关</option></select></label>
+  <label>AI 自主执行 <select name="privileged_tools_on"><option value="">继承全局</option><option value="true">开（风险工具不再要求主人）</option><option value="false">关</option></select></label>
   <label>启发式粗筛 <select name="heuristic_on"><option value="">继承全局</option><option value="true">开</option><option value="false">关</option></select></label>
   <label>AI 判官 <select name="judge_on"><option value="">继承全局</option><option value="true">开</option><option value="false">关</option></select></label>
   <label>AI 初筛脚本 <select name="screen_on"><option value="">继承全局</option><option value="true">开</option><option value="false">关</option></select></label>
@@ -94,8 +67,10 @@ button{background:#5e81ac;color:#fff;border:0;border-radius:4px;padding:7px 16px
   <div id="moodView"></div>
   <button type="button" id="bMoodReset" style="margin-top:8px">重置为基线</button>
 </fieldset>
-</div>
+{% endblock %}
+{% block scripts %}
 <script>
+
 let GID = new URLSearchParams(location.search).get('gid') || '';
 const BUILTIN = [['qq.text','群发文本'],['qq.image','群发图片'],['qq.voice','群发语音'],
  ['qq.at_all','@全体成员（主人）'],['qq.member_info','查群成员身份'],
@@ -111,12 +86,15 @@ const BUILTIN = [['qq.text','群发文本'],['qq.image','群发图片'],['qq.voi
  ['watcher.stop','停止监测程序（主人）'],['watcher.logs','看监测日志'],
  ['history.query','查历史消息'],['usage.stats','查token用量'],
  ['qzone.publish','发QQ空间说说（主人）'],['qzone.delete','删QQ空间说说（主人）'],
- ['qzone.recent','查空间发布留痕'],
+ ['qzone.recent','查空间发布留痕'],['qzone.list','读空间说说列表'],
+ ['qzone.detail','看说说正文和评论'],['qzone.images','看空间配图'],
+ ['qzone.feeds','看好友动态'],['qzone.comment','评论/回复空间评论（主人）'],
+ ['qzone.like','空间点赞（主人）'],
  ['message.read_image','回看消息图片'],['message.save_image','保存消息图片到工作区'],
  ['message.read_forward','展开合并转发'],
  ['meme.lookup','梗指南查梗'],
  ['code.python','执行Python（主人）'],['code.shell','执行Shell（主人）']];
-const SEL_KEYS = ['model','enable_thinking','split_reply','heuristic_on','judge_on',
+const SEL_KEYS = ['model','enable_thinking','split_reply','privileged_tools_on','heuristic_on','judge_on',
                   'memory_on','self_memory_on','mood_on','learn_style_on','reminder_on','wake_on',
                   'speakup_on','interrupt_on','ambient_context_on','screen_on',
                   'loop_on','meme_guide_on','at_only_on','quote_reply_on',
@@ -349,5 +327,6 @@ document.getElementById('bStyleClear').onclick=async()=>{
 };
 document.getElementById('gidbox').value=GID;
 if (GID) loadGroup();
+
 </script>
-</body></html>
+{% endblock %}

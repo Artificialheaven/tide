@@ -13,6 +13,11 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 
+# 失败标记（补全接口失败后暂时不再重试）总条数上限。
+# 群/成员数量可能很大，标记只写不清会让这两个 dict 随运行时间无限增长。
+_FAILED_MAX = 2048
+
+
 def _now() -> float:
     return time.monotonic()
 
@@ -37,11 +42,14 @@ class MemberRecord:
 
 
 class GroupCache:
-    def __init__(self, ttl: int = 600, failed_retry: int = 300):
+    def __init__(self, ttl: int = 600, failed_retry: int = 300,
+                 failed_capacity: int = _FAILED_MAX):
         self.ttl = max(0, int(ttl))
         self.failed_retry = max(0, int(failed_retry))
+        self.failed_capacity = max(1, int(failed_capacity))
         self._data: "OrderedDict[str, GroupRecord]" = OrderedDict()
         self._failed: dict[str, float] = {}
+        self._failed_marks = 0
 
     def get(self, group_id: str) -> Optional[GroupRecord]:
         return self._data.get(str(group_id))
@@ -69,8 +77,26 @@ class GroupCache:
             self._data.popitem(last=False)
         return record
 
+    def _prune_failed(self, now: Optional[float] = None) -> None:
+        """清扫过期失败标记，并把总条数压到上限内（惰性，仅在写入时调用）。"""
+        if not self._failed:
+            return
+        if now is None:
+            now = _now()
+        retry = self.failed_retry
+        for key, ts in list(self._failed.items()):
+            if retry <= 0 or now - ts >= retry:
+                self._failed.pop(key, None)
+        while len(self._failed) > self.failed_capacity:
+            self._failed.pop(next(iter(self._failed)), None)
+
     def mark_failed(self, group_id: str) -> None:
         self._failed[str(group_id)] = _now()
+        self._failed_marks += 1
+        # 超上限或每 64 次标记做一次惰性清扫，避免每次失败都全表扫描
+        if (len(self._failed) > self.failed_capacity
+                or self._failed_marks % 64 == 0):
+            self._prune_failed()
 
     def needs_refresh(self, group_id: str) -> bool:
         gid = str(group_id)
@@ -89,11 +115,14 @@ class GroupCache:
 
 
 class MemberCache:
-    def __init__(self, ttl: int = 600, failed_retry: int = 300):
+    def __init__(self, ttl: int = 600, failed_retry: int = 300,
+                 failed_capacity: int = _FAILED_MAX):
         self.ttl = max(0, int(ttl))
         self.failed_retry = max(0, int(failed_retry))
+        self.failed_capacity = max(1, int(failed_capacity))
         self._data: "OrderedDict[tuple[str, str], MemberRecord]" = OrderedDict()
         self._failed: dict[tuple[str, str], float] = {}
+        self._failed_marks = 0
 
     def get(self, group_id: str, user_id: str) -> Optional[MemberRecord]:
         return self._data.get((str(group_id), str(user_id)))
@@ -129,8 +158,26 @@ class MemberCache:
             self._data.popitem(last=False)
         return record
 
+    def _prune_failed(self, now: Optional[float] = None) -> None:
+        """清扫过期失败标记，并把总条数压到上限内（惰性，仅在写入时调用）。"""
+        if not self._failed:
+            return
+        if now is None:
+            now = _now()
+        retry = self.failed_retry
+        for key, ts in list(self._failed.items()):
+            if retry <= 0 or now - ts >= retry:
+                self._failed.pop(key, None)
+        while len(self._failed) > self.failed_capacity:
+            self._failed.pop(next(iter(self._failed)), None)
+
     def mark_failed(self, group_id: str, user_id: str) -> None:
         self._failed[(str(group_id), str(user_id))] = _now()
+        self._failed_marks += 1
+        # 超上限或每 64 次标记做一次惰性清扫，避免每次失败都全表扫描
+        if (len(self._failed) > self.failed_capacity
+                or self._failed_marks % 64 == 0):
+            self._prune_failed()
 
     def needs_refresh(self, group_id: str, user_id: str) -> bool:
         key = (str(group_id), str(user_id))

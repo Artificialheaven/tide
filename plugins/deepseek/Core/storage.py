@@ -13,10 +13,16 @@ import time
 
 # ── 连接 ─────────────────────────────────────────────────────────
 
+# 单条 DAL 的忙等上限。WAL 模式下来自其它线程的写锁通常只持续几毫秒，
+# 2s 足够吸收正常竞争；原 10s 会让一次写锁竞争把整个事件循环冻住 10 秒。
+_BUSY_TIMEOUT_S = 2.0
+
+
 def connect(db_path: str) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path, timeout=10)
+    # 注意：这里不能设 journal_mode=WAL。WAL 是库文件持久属性，migrate() 已设过；
+    # 每次连接重设实测多花 0.9ms（186 个调用点，触发轮 15~25 次 DAL）。
+    conn = sqlite3.connect(db_path, timeout=_BUSY_TIMEOUT_S)
     conn.row_factory = sqlite3.Row
-    conn.execute('PRAGMA journal_mode=WAL')
     conn.execute('PRAGMA foreign_keys=ON')
     return conn
 
@@ -537,11 +543,110 @@ _DDL_V17 = [
 ]
 
 
+# v18：agent 增强（docs/agent-framework-enhancement-plan-2026-11-25.md）。
+# approvals 是审批事实来源；hook_logs 记风险工具审计；subagent_runs 记子代理账。
+_DDL_V18 = [
+    """CREATE TABLE IF NOT EXISTS approvals (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        gid           TEXT NOT NULL,
+        chat_type     TEXT NOT NULL DEFAULT 'group',
+        actor_id      TEXT NOT NULL DEFAULT '',
+        actor_name    TEXT DEFAULT '',
+        tool_key      TEXT NOT NULL,
+        args_json     TEXT NOT NULL DEFAULT '{}',
+        args_preview  TEXT DEFAULT '',
+        status        TEXT NOT NULL DEFAULT 'pending',
+        decided_by    TEXT DEFAULT '',
+        decided_at    REAL DEFAULT 0,
+        created_at    REAL NOT NULL,
+        expires_at    REAL NOT NULL,
+        turn_id       TEXT DEFAULT '',
+        source        TEXT DEFAULT 'tool'
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_approvals_status ON approvals(status, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_approvals_gid ON approvals(gid, created_at)",
+    """CREATE TABLE IF NOT EXISTS hook_logs (
+        id        INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts        REAL NOT NULL,
+        gid       TEXT DEFAULT '',
+        point     TEXT NOT NULL,
+        hook      TEXT NOT NULL,
+        tool_key  TEXT DEFAULT '',
+        action    TEXT NOT NULL,
+        detail    TEXT DEFAULT ''
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_hook_logs_ts ON hook_logs(ts)",
+    """CREATE TABLE IF NOT EXISTS subagent_runs (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        turn_id     TEXT NOT NULL,
+        gid         TEXT NOT NULL,
+        task        TEXT NOT NULL,
+        rounds      INTEGER DEFAULT 0,
+        tokens      INTEGER DEFAULT 0,
+        truncated   INTEGER DEFAULT 0,
+        error       TEXT DEFAULT '',
+        created_at  REAL NOT NULL
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_subagent_runs_gid ON subagent_runs(gid, created_at)",
+]
+
+
+# v20：QQ 空间「被动知会」——被 @ / 收到评论 / 收到点赞都只能靠轮询
+# NapCat 的 get_qzone_feeds、get_qzone_msg_list、get_qzone_msg_detail（上游
+# 没有任何空间事件上报）。轮询结果先落 qzone_events 去重，再由 watcher 逐条
+# 合成一次对话触发；qzone_state 存各条游标（上次扫描的新鲜边界），避免重启
+# 后重复提醒。
+_DDL_V20 = [
+    """CREATE TABLE IF NOT EXISTS qzone_events (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        kind          TEXT NOT NULL,
+        tid           TEXT NOT NULL DEFAULT '',
+        actor_uin     TEXT NOT NULL DEFAULT '',
+        actor_name    TEXT NOT NULL DEFAULT '',
+        content       TEXT NOT NULL DEFAULT '',
+        comment_id    TEXT NOT NULL DEFAULT '',
+        comment_uin   TEXT NOT NULL DEFAULT '',
+        parent_id     TEXT NOT NULL DEFAULT '',
+        event_time    REAL NOT NULL DEFAULT 0,
+        handle_gid    TEXT NOT NULL DEFAULT '',
+        status        TEXT NOT NULL DEFAULT 'pending',
+        attempts      INTEGER NOT NULL DEFAULT 0,
+        last_error    TEXT NOT NULL DEFAULT '',
+        created_at    REAL NOT NULL,
+        handled_at    REAL NOT NULL DEFAULT 0,
+        UNIQUE(tid, kind, comment_id, actor_uin)
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_qzone_events_status ON qzone_events(status, id)",
+    "CREATE INDEX IF NOT EXISTS idx_qzone_events_created ON qzone_events(created_at)",
+    """CREATE TABLE IF NOT EXISTS qzone_state (
+        key        TEXT PRIMARY KEY,
+        value      TEXT NOT NULL DEFAULT '',
+        updated_at REAL NOT NULL DEFAULT 0
+    )""",
+]
+
+# v21：查询计划补索引（性能审计 P0-4 / P1-1 / P2-1 / P2-2）。
+# usage_log.created_at 之前没有前导索引，仪表盘 14 天趋势是 15 次全表扫。
+_DDL_V21 = [
+    "CREATE INDEX IF NOT EXISTS idx_usage_created ON usage_log(created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_messages_group_summarized "
+    "ON messages(group_id, summarized, id)",
+    "CREATE INDEX IF NOT EXISTS idx_groups_updated ON groups(updated_at)",
+    "CREATE INDEX IF NOT EXISTS idx_groups_enabled_updated "
+    "ON groups(enabled, updated_at)",
+    "CREATE INDEX IF NOT EXISTS idx_users_last_seen ON users(last_seen)",
+    "CREATE INDEX IF NOT EXISTS idx_raw_group_time "
+    "ON raw_messages(group_id, created_at)",
+]
+
+
 def migrate(db_path: str):
     """初始化/升级数据库。幂等。"""
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
     conn = connect(db_path)
     try:
+        # WAL 是库文件持久属性：只在迁移时设一次，避免每次 connect 多花 0.9ms
+        conn.execute('PRAGMA journal_mode=WAL')
         version = conn.execute('PRAGMA user_version').fetchone()[0]
         if version < 1:
             for ddl in _DDL:
@@ -639,6 +744,34 @@ def migrate(db_path: str):
             for ddl in _DDL_V17:
                 conn.execute(ddl)
             conn.execute('PRAGMA user_version=17')
+        if version < 18:
+            for ddl in _DDL_V18:
+                conn.execute(ddl)
+            cols = {r[1] for r in
+                    conn.execute('PRAGMA table_info(loop_sessions)')}
+            if 'chat_type' not in cols:
+                # M-17：长跑会话记录真实 chat_type，重启后不再靠 owner 猜私聊
+                conn.execute("ALTER TABLE loop_sessions "
+                             "ADD COLUMN chat_type TEXT NOT NULL DEFAULT 'group'")
+            conn.execute('PRAGMA user_version=18')
+        if version < 19:
+            # U-13：群列表显示群名（历史库补列，值为空时前端回退显示群号）
+            cols = {r[1] for r in conn.execute('PRAGMA table_info(groups)')}
+            if 'group_name' not in cols:
+                conn.execute("ALTER TABLE groups ADD COLUMN group_name TEXT NOT NULL DEFAULT ''")
+            conn.execute('PRAGMA user_version=19')
+        if version < 20:
+            for ddl in _DDL_V20:
+                conn.execute(ddl)
+            cols = {r[1] for r in conn.execute('PRAGMA table_info(qzone_posts)')}
+            if 'images' not in cols:
+                conn.execute("ALTER TABLE qzone_posts "
+                             "ADD COLUMN images TEXT NOT NULL DEFAULT '[]'")
+            conn.execute('PRAGMA user_version=20')
+        if version < 21:
+            for ddl in _DDL_V21:
+                conn.execute(ddl)
+            conn.execute('PRAGMA user_version=21')
         conn.commit()
     except Exception:
         conn.rollback()
@@ -676,8 +809,8 @@ def get_or_create_group(db_path: str, group_id) -> dict:
         conn = connect(db_path)
         try:
             conn.execute(
-                'INSERT INTO groups (group_id, enabled, persona, aliases, '
-                'settings_json, last_active, created_at, updated_at) '
+                'INSERT OR IGNORE INTO groups (group_id, enabled, persona, '
+                'aliases, settings_json, last_active, created_at, updated_at) '
                 "VALUES (?, 0, '', '', '{}', ?, ?, ?)",
                 (str(group_id), now, now, now))
             conn.commit()
@@ -688,11 +821,13 @@ def get_or_create_group(db_path: str, group_id) -> dict:
 
 
 def upsert_group(db_path: str, group_id, *, enabled=None, persona=None,
-                 aliases=None, settings=None, touch=True) -> dict:
+                 aliases=None, settings=None, touch=True, group_name=None) -> dict:
     get_or_create_group(db_path, group_id)
     fields, vals = [], []
     if enabled is not None:
         fields.append('enabled=?'); vals.append(1 if enabled else 0)
+    if group_name is not None:
+        fields.append('group_name=?'); vals.append(str(group_name)[:120])
     if persona is not None:
         fields.append('persona=?'); vals.append(persona)
     if aliases is not None:
@@ -766,6 +901,27 @@ def messages_since(db_path: str, group_id, after_id: int,
             'SELECT * FROM messages WHERE group_id=? AND id>? '
             'ORDER BY id DESC LIMIT ?',
             (str(group_id), int(after_id), int(limit))).fetchall()
+        return [dict(r) for r in reversed(rows)]
+    finally:
+        conn.close()
+
+
+def messages_before(db_path: str, group_id, before_id: int, limit: int,
+                    roles: tuple = ('user', 'assistant')) -> list:
+    """取 id < before_id 的最近 limit 条（正序返回），供摘要重建分页用。"""
+    roles = tuple(roles or ())
+    role_sql = ''
+    args = [str(group_id), int(before_id)]
+    if roles:
+        role_sql = ' AND role IN (%s)' % ','.join('?' * len(roles))
+        args.extend(roles)
+    args.append(int(limit))
+    conn = connect(db_path)
+    try:
+        rows = conn.execute(
+            'SELECT id, role, sender_id, sender_name, content FROM messages '
+            f'WHERE group_id=? AND id<?{role_sql} '
+            'ORDER BY id DESC LIMIT ?', args).fetchall()
         return [dict(r) for r in reversed(rows)]
     finally:
         conn.close()
@@ -1112,6 +1268,34 @@ def upsert_user(db_path: str, user_id, name: str = '', group_id='') -> dict:
         conn.close()
 
 
+def get_users_many(db_path: str, user_ids) -> dict:
+    """批量取用户（一次连接 + IN 查询），返回 {user_id: {names: [...]}}。
+
+    性能审计 P1-5：原实现每个 @/回复目标各开一次连接查昵称。
+    """
+    ids = [str(x) for x in (user_ids or []) if str(x or '')]
+    if not ids:
+        return {}
+    out = {}
+    conn = connect(db_path)
+    try:
+        # 分批，避免 SQLite 变量数上限（默认 999）
+        for i in range(0, len(ids), 400):
+            chunk = ids[i:i + 400]
+            ph = ','.join('?' * len(chunk))
+            for r in conn.execute(
+                    f'SELECT user_id, names FROM users WHERE user_id IN ({ph})',
+                    chunk).fetchall():
+                try:
+                    names = json.loads(r['names'] or '[]')
+                except json.JSONDecodeError:
+                    names = []
+                out[str(r['user_id'])] = {'names': names}
+        return out
+    finally:
+        conn.close()
+
+
 def get_user(db_path: str, user_id) -> dict | None:
     conn = connect(db_path)
     try:
@@ -1129,12 +1313,22 @@ def get_user(db_path: str, user_id) -> dict | None:
 def list_users(db_path: str, query: str = '', limit: int = 100) -> list:
     conn = connect(db_path)
     try:
-        if query:
-            like = f'%{query}%'
-            rows = conn.execute(
-                "SELECT * FROM users WHERE user_id LIKE ? OR names LIKE ? "
-                "ORDER BY last_seen DESC LIMIT ?",
-                (like, like, int(limit))).fetchall()
+        rows = []
+        q = (query or '').strip()
+        if q:
+            # 纯数字（QQ 号）先走主键精确匹配，避免 users 全表 LIKE 扫；
+            # 没命中再退回昵称模糊匹配（保持原语义）。
+            if q.isdigit():
+                rows = conn.execute(
+                    'SELECT * FROM users WHERE user_id=? '
+                    'ORDER BY last_seen DESC LIMIT ?',
+                    (q, int(limit))).fetchall()
+            if not rows:
+                like = f'%{q}%'
+                rows = conn.execute(
+                    'SELECT * FROM users WHERE names LIKE ? '
+                    'ORDER BY last_seen DESC LIMIT ?',
+                    (like, int(limit))).fetchall()
         else:
             rows = conn.execute(
                 'SELECT * FROM users ORDER BY last_seen DESC LIMIT ?',
@@ -1824,6 +2018,30 @@ def insert_raw_message(db_path: str, group_id, sender_id, sender_name,
         conn.close()
 
 
+def recent_raw_messages(db_path: str, group_id, limit: int = 50) -> list:
+    """最近 limit 条原始语料（正序），给断线补拉做去重比对用。"""
+    conn = connect(db_path)
+    try:
+        rows = conn.execute(
+            'SELECT id, sender_id, sender_name, content, created_at '
+            'FROM raw_messages WHERE group_id=? ORDER BY id DESC LIMIT ?',
+            (str(group_id), int(limit))).fetchall()
+        return [dict(r) for r in reversed(rows)]
+    finally:
+        conn.close()
+
+
+def last_raw_time(db_path: str, group_id) -> float:
+    conn = connect(db_path)
+    try:
+        r = conn.execute(
+            'SELECT MAX(created_at) t FROM raw_messages WHERE group_id=?',
+            (str(group_id),)).fetchone()
+        return float(r['t'] or 0) if r else 0.0
+    finally:
+        conn.close()
+
+
 def count_raw_after(db_path: str, group_id, after_id: int) -> int:
     conn = connect(db_path)
     try:
@@ -1847,16 +2065,26 @@ def raw_after(db_path: str, group_id, after_id: int, limit: int) -> list:
 
 
 def trim_raw(db_path: str, group_id, cap: int) -> int:
-    """每群滚动只留最近 cap 条，返回删除条数。"""
+    """每群滚动只留最近 cap 条，返回删除条数。
+
+    性能：原实现 `id NOT IN (子查询)` 会扫该群全部 raw 行（2 万行实测 27.5ms，
+    且随历史行数线性增长）。改成「先取第 cap 条的 id 作游标，再删 id < 游标」，
+    走 idx_raw_group 的索引区间删除，成本只与删除行数相关。
+    """
     cap = int(cap)
     if cap <= 0:
         return 0
     conn = connect(db_path)
     try:
+        row = conn.execute(
+            'SELECT id FROM raw_messages WHERE group_id=? '
+            'ORDER BY id DESC LIMIT 1 OFFSET ?',
+            (str(group_id), cap - 1)).fetchone()
+        if row is None:
+            return 0
         cur = conn.execute(
-            'DELETE FROM raw_messages WHERE group_id=? AND id NOT IN '
-            '(SELECT id FROM raw_messages WHERE group_id=? ORDER BY id DESC LIMIT ?)',
-            (str(group_id), str(group_id), cap))
+            'DELETE FROM raw_messages WHERE group_id=? AND id<?',
+            (str(group_id), int(row['id'])))
         conn.commit()
         return cur.rowcount
     finally:
@@ -2069,6 +2297,17 @@ def due_commitments(db_path: str, now_ts: float) -> list:
         conn.close()
 
 
+def snooze_commitment(db_path: str, commitment_id: int, new_due: float):
+    """群级提醒关闭时把到期行顺延：不让 LIMIT 100 窗口被永久占满。"""
+    conn = connect(db_path)
+    try:
+        conn.execute('UPDATE commitments SET due_at=?, updated_at=? WHERE id=?',
+                     (float(new_due), time.time(), int(commitment_id)))
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def mark_reminded(db_path: str, commitment_id: int):
     conn = connect(db_path)
     try:
@@ -2231,6 +2470,55 @@ def add_usage(db_path: str, row: dict):
         conn.close()
 
 
+def overview_stats(db_path: str, days: int = 14) -> dict:
+    """Web 仪表盘 KPI：今日调用/ token / 命中率 / 群数 + 近 N 天迷你趋势。
+
+    性能：趋势用一条 GROUP BY 聚合完成（原实现 14 天各查一次 = 15 次
+    usage_log 全表扫，5 万行 109ms）；配合 v21 的 idx_usage_created。
+    """
+    import time as _t
+    days = max(1, int(days))
+    now = int(_t.time())
+    today = now - now % 86400
+    lo = today - (days - 1) * 86400
+    conn = connect(db_path)
+    try:
+        agg = conn.execute(
+            "SELECT COUNT(*) AS calls,"
+            " COALESCE(SUM(tokens_in),0) AS tin,"
+            " COALESCE(SUM(cache_hit),0) AS hit,"
+            " COALESCE(SUM(tokens_out),0) AS tout"
+            " FROM usage_log WHERE created_at>=?", (today,)).fetchone()
+        g = conn.execute(
+            "SELECT COUNT(*) AS total, COALESCE(SUM(enabled),0) AS on_"
+            " FROM groups").fetchone()
+        rows = conn.execute(
+            "SELECT CAST((created_at - ?) / 86400 AS INTEGER) AS bucket,"
+            " COUNT(*) AS calls,"
+            " COALESCE(SUM(tokens_in + tokens_out),0) AS tok"
+            " FROM usage_log WHERE created_at>=? AND created_at<?"
+            " GROUP BY bucket", (lo, lo, today + 86400)).fetchall()
+        by_day = {}
+        for r in rows:
+            b = int(r['bucket'])
+            if 0 <= b < days:
+                by_day[b] = (r['calls'], r['tok'])
+        series = []
+        for i in range(days):
+            calls, tok = by_day.get(i, (0, 0))
+            series.append({'day': lo + i * 86400, 'calls': calls,
+                           'tokens': tok})
+        calls = agg['calls'] or 0
+        hit_rate = (agg['hit'] / agg['tin'] * 100.0) if agg['tin'] else 0.0
+        return {'today_calls': calls, 'tokens_in': agg['tin'],
+                'tokens_out': agg['tout'], 'cache_hit': agg['hit'],
+                'hit_rate': round(hit_rate, 1),
+                'groups_total': g['total'], 'groups_enabled': g['on_'],
+                'series': series}
+    finally:
+        conn.close()
+
+
 def usage_summary(db_path: str, group_id=None, limit_rows: int = 500) -> dict:
     conn = connect(db_path)
     try:
@@ -2250,6 +2538,34 @@ def usage_summary(db_path: str, group_id=None, limit_rows: int = 500) -> dict:
             agg['by_kind'].setdefault(k, 0)
             agg['by_kind'][k] += 1
         return agg
+    finally:
+        conn.close()
+
+
+def usage_summary_many(db_path: str, group_ids: list,
+                       limit_rows: int = 200) -> dict:
+    """批量版 usage_summary：一次连接内逐群聚合，避免 /api/groups 的 N+1 建连。
+
+    语义与 usage_summary(group_id, limit_rows) 逐群调用一致（每群取最近
+    limit_rows 行），只是把 100 次 connect 合成 1 次。
+    """
+    conn = connect(db_path)
+    try:
+        out = {}
+        for gid in group_ids:
+            rows = conn.execute(
+                'SELECT * FROM usage_log WHERE group_id=? ORDER BY id DESC LIMIT ?',
+                (str(gid), int(limit_rows))).fetchall()
+            agg = {'calls': len(rows), 'tokens_in': 0, 'cache_hit': 0,
+                   'tokens_out': 0, 'by_kind': {}}
+            for r in rows:
+                agg['tokens_in'] += r['tokens_in']
+                agg['cache_hit'] += r['cache_hit']
+                agg['tokens_out'] += r['tokens_out']
+                k = r['kind']
+                agg['by_kind'][k] = agg['by_kind'].get(k, 0) + 1
+            out[str(gid)] = agg
+        return out
     finally:
         conn.close()
 
@@ -3047,15 +3363,30 @@ def set_watcher_status(db_path: str, watcher_id: int, status: str,
 # ── QQ 空间说说 DAL（发布留痕：NapCat 无列表接口，tid 只来自发布响应）────
 
 def add_qzone_post(db_path: str, tid: str, content: str, ugc_right: int = 1,
-                   creator_id: str = '', creator_name: str = '') -> None:
+                   creator_id: str = '', creator_name: str = '',
+                   images=None) -> None:
     conn = connect(db_path)
     try:
         conn.execute(
             'INSERT OR IGNORE INTO qzone_posts (tid, content, ugc_right, '
-            'creator_id, creator_name, created_at) VALUES (?,?,?,?,?,?)',
+            'creator_id, creator_name, images, created_at) '
+            'VALUES (?,?,?,?,?,?,?)',
             (str(tid), str(content or '')[:5000], int(ugc_right or 1),
-             str(creator_id or ''), str(creator_name or ''), time.time()))
+             str(creator_id or ''), str(creator_name or ''),
+             json.dumps([str(u) for u in (images or []) if u],
+                        ensure_ascii=False), time.time()))
         conn.commit()
+    finally:
+        conn.close()
+
+
+def delete_qzone_post(db_path: str, tid: str) -> bool:
+    """删除本地留痕（远端删除成功后调用；失败静默）。"""
+    conn = connect(db_path)
+    try:
+        cur = conn.execute('DELETE FROM qzone_posts WHERE tid=?', (str(tid),))
+        conn.commit()
+        return cur.rowcount > 0
     finally:
         conn.close()
 
@@ -3068,6 +3399,191 @@ def list_qzone_posts(db_path: str, limit: int = 10) -> list:
             (int(limit),)).fetchall()]
     finally:
         conn.close()
+
+
+# ── QQ 空间监听 DAL（v20）───────────────────────────────────────
+
+def add_qzone_event(db_path: str, kind: str, *, tid: str = '',
+                    actor_uin: str = '', actor_name: str = '',
+                    content: str = '', comment_id: str = '',
+                    comment_uin: str = '', parent_id: str = '',
+                    event_time: float = 0.0, handle_gid: str = '') -> bool:
+    """写入一条空间被动知会；唯一键去重。返回是否新建。"""
+    conn = connect(db_path)
+    try:
+        cur = conn.execute(
+            'INSERT OR IGNORE INTO qzone_events (kind, tid, actor_uin, '
+            'actor_name, content, comment_id, comment_uin, parent_id, '
+            'event_time, handle_gid, created_at) '
+            'VALUES (?,?,?,?,?,?,?,?,?,?,?)',
+            (str(kind), str(tid), str(actor_uin), str(actor_name),
+             str(content or '')[:2000], str(comment_id), str(comment_uin),
+             str(parent_id), float(event_time or 0), str(handle_gid),
+             time.time()))
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+def pending_qzone_events(db_path: str, limit: int = 10) -> list:
+    """待处理的知会（老事件先来）；attempts>=3 的不再自动重试。"""
+    conn = connect(db_path)
+    try:
+        return [dict(r) for r in conn.execute(
+            "SELECT * FROM qzone_events WHERE status='pending' AND attempts<3 "
+            'ORDER BY id ASC LIMIT ?', (int(limit),)).fetchall()]
+    finally:
+        conn.close()
+
+
+def mark_qzone_event(db_path: str, event_id: int, status: str,
+                     error: str = '') -> None:
+    conn = connect(db_path)
+    try:
+        if status == 'pending':
+            conn.execute(
+                'UPDATE qzone_events SET attempts=attempts+1, last_error=? '
+                'WHERE id=?', (str(error or '')[:300], int(event_id)))
+        else:
+            conn.execute(
+                'UPDATE qzone_events SET status=?, handled_at=?, '
+                'attempts=attempts+1, last_error=? WHERE id=?',
+                (str(status), time.time(), str(error or '')[:300],
+                 int(event_id)))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def recent_qzone_events(db_path: str, limit: int = 20,
+                        status: str = '') -> list:
+    conn = connect(db_path)
+    try:
+        if status:
+            rows = conn.execute(
+                'SELECT * FROM qzone_events WHERE status=? '
+                'ORDER BY id DESC LIMIT ?', (str(status), int(limit)))
+        else:
+            rows = conn.execute(
+                'SELECT * FROM qzone_events ORDER BY id DESC LIMIT ?',
+                (int(limit),))
+        return [dict(r) for r in rows.fetchall()]
+    finally:
+        conn.close()
+
+
+def get_qzone_state(db_path: str, key: str, default: str = '') -> str:
+    conn = connect(db_path)
+    try:
+        r = conn.execute('SELECT value FROM qzone_state WHERE key=?',
+                         (str(key),)).fetchone()
+        return str(r['value']) if r else default
+    finally:
+        conn.close()
+
+
+def set_qzone_state(db_path: str, key: str, value) -> None:
+    conn = connect(db_path)
+    try:
+        conn.execute(
+            'INSERT INTO qzone_state (key, value, updated_at) VALUES (?,?,?) '
+            'ON CONFLICT(key) DO UPDATE SET value=excluded.value, '
+            'updated_at=excluded.updated_at',
+            (str(key), str(value), time.time()))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def prune_qzone_events(db_path: str, days: int = 30) -> None:
+    conn = connect(db_path)
+    try:
+        conn.execute('DELETE FROM qzone_events WHERE created_at < ?',
+                     (time.time() - int(days) * 86400,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+# ── 保留策略（性能审计 P1-1）─────────────────────────────────────
+
+def prune_messages(db_path: str, keep_per_group: int = 2000) -> int:
+    """每群保留最近 keep_per_group 条，只删已摘要（summarized=1）的更老消息。
+
+    未摘要的行是摘要锚点之后的活跃窗口，**一条都不能删**；已摘要的旧行
+    只在重建摘要时用，且重建已改为分页读取。返回删除条数。
+    """
+    keep = max(200, int(keep_per_group))
+    conn = connect(db_path)
+    try:
+        total = 0
+        gids = [r['group_id'] for r in conn.execute(
+            'SELECT DISTINCT group_id FROM messages').fetchall()]
+        for gid in gids:
+            row = conn.execute(
+                'SELECT id FROM messages WHERE group_id=? '
+                'ORDER BY id DESC LIMIT 1 OFFSET ?',
+                (gid, keep - 1)).fetchone()
+            if not row:
+                continue
+            cur = conn.execute(
+                'DELETE FROM messages WHERE group_id=? AND summarized=1 AND id<?',
+                (gid, int(row['id'])))
+            total += cur.rowcount
+        conn.commit()
+        return total
+    finally:
+        conn.close()
+
+
+def prune_usage_log(db_path: str, days: int = 180) -> int:
+    """usage_log 只增不删（每次模型调用一行）；按天数保留。"""
+    conn = connect(db_path)
+    try:
+        cur = conn.execute('DELETE FROM usage_log WHERE created_at < ?',
+                           (time.time() - max(7, int(days)) * 86400,))
+        conn.commit()
+        return cur.rowcount
+    finally:
+        conn.close()
+
+
+def prune_qzone_state(db_path: str) -> int:
+    """清掉已不存在说说的评论文数缓存键（ccount:<tid>），防止只增。"""
+    conn = connect(db_path)
+    try:
+        cur = conn.execute(
+            "DELETE FROM qzone_state WHERE key LIKE 'ccount:%' "
+            "AND substr(key, 8) NOT IN (SELECT tid FROM qzone_posts)")
+        conn.commit()
+        return cur.rowcount
+    finally:
+        conn.close()
+
+
+def housekeeping(db_path: str, *, keep_per_group: int = 2000,
+                 usage_days: int = 180, qzone_days: int = 30) -> dict:
+    """一次会话跑完全部保留策略，返回各表删除行数（供定时任务日志用）。"""
+    out = {'messages': 0, 'usage_log': 0, 'qzone_events': 0,
+           'qzone_state': 0}
+    out['messages'] = prune_messages(db_path, keep_per_group)
+    out['usage_log'] = prune_usage_log(db_path, usage_days)
+    before = 0
+    conn = connect(db_path)
+    try:
+        before = conn.execute('SELECT COUNT(*) FROM qzone_events').fetchone()[0]
+    finally:
+        conn.close()
+    prune_qzone_events(db_path, qzone_days)
+    conn = connect(db_path)
+    try:
+        after = conn.execute('SELECT COUNT(*) FROM qzone_events').fetchone()[0]
+    finally:
+        conn.close()
+    out['qzone_events'] = max(0, before - after)
+    out['qzone_state'] = prune_qzone_state(db_path)
+    return out
 
 
 # ── 系统提示词覆盖（v13）─────────────────────────────────────────
@@ -3678,6 +4194,168 @@ def unbind_live_identity(db_path: str, bili_uid) -> None:
         conn.execute(
             "UPDATE live_identity SET qq='', linked_at=0 WHERE bili_uid=?",
             (str(bili_uid),))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+# ── 审批 / hooks / 子代理 DAL（v18）──────────────────────────────
+
+def create_approval(db_path: str, *, gid: str, chat_type: str,
+                    actor_id: str = '', actor_name: str = '',
+                    tool_key: str, args_json: str = '{}',
+                    args_preview: str = '', ttl: float = 120,
+                    turn_id: str = '', source: str = 'tool') -> dict:
+    now = time.time()
+    expires = now + float(ttl or 120)
+    conn = connect(db_path)
+    try:
+        cur = conn.execute(
+            'INSERT INTO approvals (gid, chat_type, actor_id, actor_name, '
+            'tool_key, args_json, args_preview, status, created_at, '
+            'expires_at, turn_id, source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+            (str(gid), str(chat_type), str(actor_id), str(actor_name),
+             str(tool_key), str(args_json), str(args_preview), 'pending',
+             now, expires, str(turn_id), str(source)))
+        conn.commit()
+        return {'id': int(cur.lastrowid), 'expires_at': expires}
+    finally:
+        conn.close()
+
+
+def get_approval(db_path: str, approval_id: int) -> dict | None:
+    conn = connect(db_path)
+    try:
+        row = conn.execute('SELECT * FROM approvals WHERE id=?',
+                           (int(approval_id),)).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def decide_approval(db_path: str, approval_id: int, status: str,
+                    decided_by: str = '') -> bool:
+    """只在 pending 时改状态；重复决定幂等返回 False。"""
+    conn = connect(db_path)
+    try:
+        cur = conn.execute(
+            'UPDATE approvals SET status=?, decided_by=?, decided_at=? '
+            'WHERE id=? AND status=?',
+            (str(status), str(decided_by), time.time(), int(approval_id),
+             'pending'))
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+def count_approvals_today(db_path: str, tool_key: str,
+                          actor_id: str = '') -> int:
+    import datetime as _dt
+    midnight = _dt.datetime.now().replace(hour=0, minute=0, second=0,
+                                          microsecond=0).timestamp()
+    conn = connect(db_path)
+    try:
+        if actor_id:
+            row = conn.execute(
+                'SELECT COUNT(*) FROM approvals WHERE tool_key=? AND '
+                'actor_id=? AND status=? AND created_at>=?',
+                (str(tool_key), str(actor_id), 'approved', midnight)).fetchone()
+        else:
+            row = conn.execute(
+                'SELECT COUNT(*) FROM approvals WHERE tool_key=? AND '
+                'status=? AND created_at>=?',
+                (str(tool_key), 'approved', midnight)).fetchone()
+        return int(row[0] or 0)
+    finally:
+        conn.close()
+
+
+def pending_approvals(db_path: str, gid: str | None = None) -> list[dict]:
+    conn = connect(db_path)
+    try:
+        if gid:
+            rows = conn.execute(
+                'SELECT * FROM approvals WHERE status=? AND gid=? '
+                'ORDER BY id DESC', ('pending', str(gid))).fetchall()
+        else:
+            rows = conn.execute(
+                'SELECT * FROM approvals WHERE status=? ORDER BY id DESC',
+                ('pending',)).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def expire_stale_approvals(db_path: str) -> int:
+    conn = connect(db_path)
+    try:
+        cur = conn.execute(
+            'UPDATE approvals SET status=?, decided_by=? '
+            'WHERE status=? AND expires_at < ?',
+            ('expired', 'timeout', 'pending', time.time()))
+        conn.commit()
+        return cur.rowcount
+    finally:
+        conn.close()
+
+
+def add_hook_log(db_path: str, *, gid: str, point: str, hook: str,
+                 tool_key: str = '', action: str = 'allow',
+                 detail: str = '') -> None:
+    conn = connect(db_path)
+    try:
+        conn.execute(
+            'INSERT INTO hook_logs (ts, gid, point, hook, tool_key, action, '
+            'detail) VALUES (?,?,?,?,?,?,?)',
+            (time.time(), str(gid), str(point), str(hook), str(tool_key),
+             str(action), str(detail)[:1000]))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def group_tokens_today(db_path: str, gid: str) -> int:
+    import datetime as _dt
+    midnight = _dt.datetime.now().replace(hour=0, minute=0, second=0,
+                                          microsecond=0).timestamp()
+    conn = connect(db_path)
+    try:
+        row = conn.execute(
+            'SELECT COALESCE(SUM(tokens_in + tokens_out), 0) FROM usage_log '
+            'WHERE group_id=? AND created_at>=?', (str(gid), midnight)
+        ).fetchone()
+        return int(row[0] or 0)
+    finally:
+        conn.close()
+
+
+def add_subagent_run(db_path: str, *, turn_id: str, gid: str, task: str,
+                     rounds: int = 0, tokens: int = 0, truncated: int = 0,
+                     error: str = '') -> None:
+    conn = connect(db_path)
+    try:
+        conn.execute(
+            'INSERT INTO subagent_runs (turn_id, gid, task, rounds, tokens, '
+            'truncated, error, created_at) VALUES (?,?,?,?,?,?,?,?)',
+            (str(turn_id), str(gid), str(task)[:1000], int(rounds),
+             int(tokens), int(truncated), str(error)[:500], time.time()))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def prune_aux_tables(db_path: str) -> None:
+    """approvals 保留 90 天，hook_logs / subagent_runs 保留 30 天。"""
+    now = time.time()
+    conn = connect(db_path)
+    try:
+        conn.execute('DELETE FROM approvals WHERE created_at < ?',
+                     (now - 90 * 86400,))
+        conn.execute('DELETE FROM hook_logs WHERE ts < ?',
+                     (now - 30 * 86400,))
+        conn.execute('DELETE FROM subagent_runs WHERE created_at < ?',
+                     (now - 30 * 86400,))
         conn.commit()
     finally:
         conn.close()

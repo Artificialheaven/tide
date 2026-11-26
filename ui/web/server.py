@@ -19,7 +19,11 @@ from .auth import init_auth, login_required, try_login, logout as do_logout
 _app = flask.Flask(
     __name__,
     template_folder=os.path.join(os.path.dirname(__file__), "templates"),
-    static_folder=os.path.join(os.path.dirname(__file__), "templates"),
+    # 静态资源独立放在 ui/web/static/（不要把 templates/ 当静态根：那样模板源码
+    # 会以 /static/*.html 直接暴露）。页面里统一引用 /static/...，因此显式指定
+    # static_url_path，避免 Flask 用目录基名推导出别的前缀导致全站 CSS/JS 404。
+    static_folder=os.path.join(os.path.dirname(__file__), "static"),
+    static_url_path="/static",
 )
 _app.secret_key = os.urandom(24).hex()
 _app.config["PERMANENT_SESSION_LIFETIME"] = 3600 * 24  # 24 小时
@@ -27,6 +31,12 @@ _app.config["PERMANENT_SESSION_LIFETIME"] = 3600 * 24  # 24 小时
 _socketio = SocketIO(_app, cors_allowed_origins="*", async_mode="threading")
 _server_thread = None
 _running = False
+# 已注册的 Blueprint：plugin_key → (蓝图名, 注册代数)。
+# 热重载会重新导入插件模块，蓝图里闭包的是旧模块函数，
+# 因此每次注册都要先摘掉上一代蓝图再挂新的（url_prefix 不变，页面 URL 不变）。
+_registered_blueprints: dict[str, tuple[str, int]] = {}
+_blueprint_generation = 0
+_blueprint_lock = threading.Lock()
 
 # ---------- 日志缓冲区（环形） ----------
 _log_buffer: list[dict] = []
@@ -77,8 +87,6 @@ def index():
 def api_login():
     data = flask.request.get_json(silent=True) or {}
     password = data.get("password", "")
-    from .auth import AUTH_TOKEN
-    print(f"[Web管理] 登录尝试 — 输入: '{password}' 期望: '{AUTH_TOKEN}'")
     if try_login(password):
         print("[Web管理] 登录成功")
         return flask.jsonify({"ok": True})
@@ -146,7 +154,11 @@ def _validate_config_update(data: dict) -> tuple[dict, str]:
         if key in _SECRET_KEYS:
             clean[key] = str(value or '').strip()
         elif key in _BOOL_KEYS:
-            clean[key] = bool(value)
+            # 脚本/旧前端会把 false 传成字符串，bool("false") == True 会静默打开开关
+            if isinstance(value, str):
+                clean[key] = value.strip().lower() in ('1', 'true', 'yes', 'on')
+            else:
+                clean[key] = bool(value)
         elif key in _INT_RANGES:
             try:
                 number = int(value)
@@ -223,6 +235,15 @@ def api_list_plugins():
 def api_reload_plugin(name):
     from utils.plugin_loader import reload_plugin
     ok = reload_plugin(name)
+    if ok:
+        # 热重载后必须重新挂蓝图：否则 Flask 里留着的还是首代 Core/web 模块函数
+        try:
+            from utils.plugin_loader import get_plugin_manager
+            mgr = get_plugin_manager()
+            if mgr is not None:
+                register_plugin_blueprints(mgr)
+        except Exception as e:
+            print(f"[Web管理] 插件 {name} 热重载后重新注册 Web 路由失败: {e}")
     return flask.jsonify({"ok": ok})
 
 
@@ -295,15 +316,16 @@ def api_save_plugin_config(name):
     if not data:
         return flask.jsonify({"ok": False, "error": "无数据"}), 400
 
-    # 保存到插件目录的 config.json
+    # 先确认插件已加载：未加载时前端提交的只是 web.json 子集，
+    # 整文件覆盖会永久丢掉 llm_providers/api_key 等未登记键
+    if not mgr or name not in mgr.plugins:
+        return flask.jsonify(
+            {"ok": False, "error": "插件未加载，配置未保存（请先重载插件）"}), 409
+    plugin = mgr.plugins[name]
+
     plugins_dir = os.path.join(os.path.dirname(__file__), "..", "..", "plugins")
     plugin_dir = os.path.join(plugins_dir, name)
     config_json_path = os.path.join(plugin_dir, "config.json")
-    try:
-        with open(config_json_path, "w", encoding="utf-8") as f:
-            _json.dump(data, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        return flask.jsonify({"ok": False, "error": str(e)}), 500
 
     # 从 web.json 读取 call_function 名称
     web_json_path = os.path.join(plugin_dir, "web.json")
@@ -316,16 +338,36 @@ def api_save_plugin_config(name):
         except Exception:
             pass
 
-    # 调用插件的 call_function（使用 web.json 中指定的函数名）
+    # 先让插件合并/校验（内存态）；失败则完全不落盘
     result = None
-    if mgr and name in mgr.plugins:
-        plugin = mgr.plugins[name]
-        try:
-            result = plugin.call_function(call_func_name, config=data)
-            print(f"[Web管理] 已调用插件 {name}.{call_func_name}(config=...)")
-        except Exception as e:
-            print(f"[Web管理] 插件 {name}.{call_func_name} 异常: {e}")
+    try:
+        result = plugin.call_function(call_func_name, config=data)
+    except Exception as e:
+        print(f"[Web管理] 插件 {name}.{call_func_name} 异常: {e}")
+        return flask.jsonify({"ok": False,
+                              "error": f"插件保存失败: {e}"}), 500
+    if isinstance(result, dict) and result.get("ok") is False:
+        return flask.jsonify(result), 400
 
+    # 与磁盘旧配置合并后再原子写：保留 web.json 未登记的键
+    merged = {}
+    try:
+        with open(config_json_path, "r", encoding="utf-8") as f:
+            merged = _json.load(f)
+    except Exception:
+        merged = {}
+    if not isinstance(merged, dict):
+        merged = {}
+    merged.update(data)
+    try:
+        tmp_path = config_json_path + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            _json.dump(merged, f, ensure_ascii=False, indent=2)
+        _os.replace(tmp_path, config_json_path)
+    except Exception as e:
+        return flask.jsonify({"ok": False, "error": str(e)}), 500
+
+    print(f"[Web管理] 已调用插件 {name}.{call_func_name}(config=...)")
     return flask.jsonify({"ok": True, "result": result})
 
 
@@ -417,12 +459,70 @@ def on_disconnect():
 # ============================================================
 #  插件 Blueprint 注册
 # ============================================================
+def _purge_blueprint(bp_name: str) -> None:
+    """把某个已注册的 Blueprint 从 Flask app 上摘掉。
+
+    Flask 没有 unregister_blueprint，只能手动清理它登记过的 url rule、
+    view 函数和各类请求回调，再重建路由匹配器。仅用于插件热重载后的替换。
+    """
+    if not bp_name:
+        return
+    prefix = bp_name + '.'
+    removed_rule = False
+    for rule in list(_app.url_map.iter_rules()):
+        endpoint = str(getattr(rule, 'endpoint', '') or '')
+        if endpoint != bp_name and not endpoint.startswith(prefix):
+            continue
+        try:
+            _app.url_map._rules.remove(rule)
+        except ValueError:
+            continue
+        removed_rule = True
+        rules = _app.url_map._rules_by_endpoint.get(endpoint)
+        if rules:
+            try:
+                rules.remove(rule)
+            except ValueError:
+                pass
+            if not rules:
+                _app.url_map._rules_by_endpoint.pop(endpoint, None)
+        _app.view_functions.pop(endpoint, None)
+    if removed_rule:
+        # 直接改 _rules 不会置 Map._remap，重建匹配器让旧路径立刻不可匹配
+        from werkzeug.routing.matcher import StateMachineMatcher
+        matcher = StateMachineMatcher(_app.url_map.merge_slashes)
+        for rule in _app.url_map._rules:
+            matcher.add(rule)
+        matcher.update()
+        _app.url_map._matcher = matcher
+
+    # 蓝图级 before/after/teardown/context/error 回调：注册时按蓝图名合并进 app
+    for mapping in (_app.before_request_funcs, _app.after_request_funcs,
+                    _app.teardown_request_funcs, _app.url_default_functions,
+                    _app.url_value_preprocessors,
+                    _app.template_context_processors):
+        for key in list(mapping.keys()):
+            if isinstance(key, str) and (key == bp_name
+                                         or key.startswith(prefix)):
+                mapping.pop(key, None)
+    for key in list(_app.error_handler_spec.keys()):
+        if isinstance(key, str) and (key == bp_name
+                                     or key.startswith(prefix)):
+            _app.error_handler_spec.pop(key, None)
+    # Jinja 模板加载器在渲染时遍历 app.blueprints，摘掉即不再加载旧模板目录
+    _app.blueprints.pop(bp_name, None)
+
+
 def register_plugin_blueprints(plugin_manager):
-    """遍历所有已加载插件，注册其 Flask Blueprint。
+    """遍历所有已加载插件，注册（已注册过的则替换成当前这一代）Flask Blueprint。
 
     每个 Blueprint 自动挂载到 /<插件文件夹名>/ 路径下，
     所有路由自动应用登录认证。
+
+    热重载后插件模块被重新导入，旧蓝图里闭包的是被替换掉的旧模块函数；
+    因此这里记录 plugin_key → (蓝图名, 代数)，每次调用先摘旧蓝图再挂新蓝图。
     """
+    global _blueprint_generation
     from flask import session as _flask_session, jsonify as _flask_jsonify
 
     def _check_auth():
@@ -431,18 +531,56 @@ def register_plugin_blueprints(plugin_manager):
             return _flask_jsonify({"error": "未登录"}), 401
         return None
 
-    for folder_name, plugin in plugin_manager.plugins.items():
+    with _blueprint_lock:
+        # Flask 3.x 处理过首个请求后会禁止再调用 register_blueprint；
+        # 热重载是运行期行为，这里临时复位该标志（它只用于 setup 校验），
+        # 注册完成后恢复原值，不影响请求分发。
+        first_request_done = getattr(_app, '_got_first_request', False)
+        _app._got_first_request = False
         try:
-            bp = plugin.get_web_blueprint()
-        except Exception as e:
-            print(f"[Web管理] 插件 {folder_name} get_web_blueprint() 异常: {e}")
-            continue
-        if bp is None:
-            continue
-        # 自动注入登录认证
-        bp.before_request(_check_auth)
-        _app.register_blueprint(bp, url_prefix=f"/{folder_name}")
-        print(f"[Web管理] 已注册插件 {folder_name} 的 Web 路由: /{folder_name}/")
+            plugins = dict(getattr(plugin_manager, 'plugins', None) or {})
+            # 已卸载/禁用的插件：摘掉它残留的旧蓝图，避免继续挂旧页面
+            for folder_name in list(_registered_blueprints.keys()):
+                if folder_name in plugins:
+                    continue
+                old_name = _registered_blueprints.pop(folder_name)[0]
+                _purge_blueprint(old_name)
+                print(f"[Web管理] 已移除插件 {folder_name} 的 Web 路由: "
+                      f"/{folder_name}/")
+
+            for folder_name, plugin in plugins.items():
+                entry = _registered_blueprints.pop(folder_name, None)
+                old_name, old_gen = entry if entry else ('', 0)
+                try:
+                    bp = plugin.get_web_blueprint()
+                except Exception as e:
+                    # 取新蓝图失败时保留旧蓝图：可能只是临时异常，总比页面 404 好
+                    print(f"[Web管理] 插件 {folder_name} "
+                          f"get_web_blueprint() 异常: {e}")
+                    if old_name:
+                        _registered_blueprints[folder_name] = (old_name,
+                                                               old_gen)
+                    continue
+                _purge_blueprint(old_name)
+                if bp is None:
+                    print(f"[Web管理] 插件 {folder_name} 未提供 Web 页面，"
+                          f"已移除旧路由: /{folder_name}/")
+                    continue
+                # 自动注入登录认证（必须在 register 前，注册后蓝图会拒绝再改）
+                bp.before_request(_check_auth)
+                try:
+                    _app.register_blueprint(bp, url_prefix=f"/{folder_name}")
+                except ValueError as e:
+                    print(f"[Web管理] 插件 {folder_name} "
+                          f"Blueprint 名称冲突: {e}")
+                    continue
+                _blueprint_generation += 1
+                _registered_blueprints[folder_name] = (bp.name,
+                                                       _blueprint_generation)
+                print(f"[Web管理] 已注册插件 {folder_name} 的 Web 路由: "
+                      f"/{folder_name}/")
+        finally:
+            _app._got_first_request = first_request_done
 
 
 # ============================================================
@@ -457,7 +595,6 @@ def start_web_server(host: str = "0.0.0.0", port: int = 8081, token: str = "test
         return
 
     init_auth(token)
-    _running = True
 
     def _run():
         from .auth import AUTH_TOKEN
@@ -468,13 +605,22 @@ def start_web_server(host: str = "0.0.0.0", port: int = 8081, token: str = "test
 
     _server_thread = threading.Thread(target=_run, daemon=True)
     _server_thread.start()
+    _running = True
     print("[Web管理] 服务器线程已启动")
 
 
 def stop_web_server():
-    """停止 Web 管理服务器"""
-    global _running
+    """停止 Web 管理服务器（真正停 socketio 并 join 线程）"""
+    global _running, _server_thread
     _running = False
+    try:
+        _socketio.stop()
+    except Exception:
+        pass
+    t = _server_thread
+    if t is not None and t.is_alive():
+        t.join(timeout=5)
+    _server_thread = None
     print("[Web管理] 服务器已停止")
 
 

@@ -69,10 +69,17 @@ def select_window(rows: list, rounds: int, char_budget: int) -> list:
     hard_limit = max(2, int(rounds) * 2 + 8)
     win = rows[-hard_limit:]
 
-    # 字符预算：从最旧开始丢（工具行不能打头、assistant.tool_calls 必须带齐 tool 结果）
-    while win and sum(_content_len(r) for r in win) > char_budget and len(win) > 1:
+    # 字符预算：从最旧开始丢（工具行不能打头、assistant.tool_calls 必须带齐
+    # tool 结果）。P2-3：维护增量累计，每丢一条只减去它自己的长度，
+    # 仅当 _trim_orphans 真的删了残行时才重算，避免每丢一行全窗重算。
+    total = sum(_content_len(r) for r in win)
+    while win and total > char_budget and len(win) > 1:
+        total -= _content_len(win[0])
         win = win[1:]
-        win = _trim_orphans(win)
+        trimmed = _trim_orphans(win)
+        if len(trimmed) != len(win):
+            total = sum(_content_len(r) for r in trimmed)
+        win = trimmed
     return _trim_orphans(win)
 
 
@@ -399,11 +406,27 @@ def plan_tail(rows: list, keep_msgs: int, char_budget: int) -> dict:
         return {'cut': 0, 'window': []}
     keep = max(2, int(keep_msgs))
     win = rows if len(rows) <= keep else _trim_orphans(rows[-keep:])
-    # 条数没超但单条巨消息撑爆预算时，照样从最旧丢（结果仍为 rows 后缀）
-    while win and sum(_content_len(r) for r in win) > char_budget and len(win) > 1:
+    # 条数没超但单条巨消息撑爆预算时，照样从最旧丢（结果仍为 rows 后缀）。
+    # P2-3：同 select_window，增量累计字符数，避免每次全窗求和。
+    total = sum(_content_len(r) for r in win)
+    while win and total > char_budget and len(win) > 1:
+        total -= _content_len(win[0])
         win = win[1:]
-        win = _trim_orphans(win)
-    cut = len(rows) - len(win)
+        trimmed = _trim_orphans(win)
+        if len(trimmed) != len(win):
+            total = sum(_content_len(r) for r in trimmed)
+        win = trimmed
+    if not win:
+        return {'cut': len(rows), 'window': []}
+    # 锚点取窗口首行在 rows 中的真实下标：_trim_orphans/_repair_tool_chains
+    # 会删掉中段或尾部残行，长度差 cut=len(rows)-len(win) 会大于真实起点，
+    # 推进锚点时把窗口内的正常消息永久跳过（tail 模式不调摘要，丢就是丢）
+    cut = len(rows) - 1
+    win_id = win[0].get('id')
+    for idx, r in enumerate(rows):
+        if r.get('id') == win_id:
+            cut = idx
+            break
     return {'cut': cut, 'window': win}
 
 
@@ -418,13 +441,15 @@ def render_injections(rows: list, max_chars: int = 1500) -> str:
             '经验与资源索引，每轮对话自动注入，按此行事；过时条目用 inject_list '
             '查编号、inject_toggle 停用或 inject_remove 删除）')
     blocks, used = [], len(head)
-    for i, r in enumerate(rows, 1):
+    for r in rows:
         title = (r.get('title') or '').strip() or '未命名'
         text = (r.get('text') or '').strip()
         if not text:
             continue
+        # 编号用数据库 id：工具侧的 inject_remove/inject_toggle 走 id，
+        # 若用 enumerate 序号，模型照抄 [1] 会删错条目，空条目跳过后还会跳号
         scope = '全局' if r.get('global') else '本群'
-        block = f'[{i}]（{scope}）{title}\n{text}'
+        block = f"[{r.get('id')}]（{scope}）{title}\n{text}"
         if used + len(block) + 1 > max_chars:
             break
         blocks.append(block)

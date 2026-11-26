@@ -8,6 +8,7 @@
 import asyncio
 import json
 import os
+import re
 import sys
 import traceback
 
@@ -19,6 +20,8 @@ if _DIR not in sys.path:
     sys.path.insert(0, _DIR)
 
 from Core import config as cfg_mod
+from Core import backfill
+from Core import hooks
 from Core import storage
 from Core.commands import (extract_target_qq, is_owner, is_private_allowed,
                            parse_alias_arg, parse_command, parse_interrupt,
@@ -27,6 +30,7 @@ from Core.loop_run import LoopManager
 from Core.config import merge_config, parse_aliases, resolve_group
 from Core.custom_tools import CustomToolManager
 from Core.engine import Engine
+from Core.housekeeping import Housekeeper
 from Core.interrupt import InterruptHub
 from Core.live import LiveManager
 from Core.proactor import ProactorManager
@@ -48,7 +52,9 @@ from Core.status import is_status_trigger, send_status
 from Core.style import StyleManager
 from Core.triggers import TriggerManager
 from Core.watchers import WatcherManager
+from Core import notices
 from Core.qzone import QzoneClient
+from Core.qzone_watch import QzoneWatcher
 from Core.tasks import TaskManager
 from Core.version import VERSION
 
@@ -56,6 +62,30 @@ try:
     from core import globals
 except Exception:  # 单测环境
     globals = None
+
+
+# P1-8：会改群状态的指令（执行时持群锁，避免与对话轮并发读旧配置）
+_MUTATING_COMMANDS = frozenset({
+    'enable', 'disable', 'reset', 'persona', 'forget', 'style'})
+# 长跑子动作里的只读/必须免锁项：status 只读；approve/reject 要解掉
+# 正在等审批的对话轮，而那一轮持着群锁，加锁会直接死锁
+_LOOP_UNLOCKED_SUBS = frozenset({'status', 'approve', 'reject'})
+
+
+def _command_mutates(action: str, arg: str) -> bool:
+    """该指令是否会写群状态/长跑会话（决定要不要持群锁执行）。"""
+    if action in _MUTATING_COMMANDS:
+        return True
+    if action == 'loop':
+        try:
+            sub = parse_loop_arg(arg)[0]
+        except Exception:
+            return False
+        return sub not in _LOOP_UNLOCKED_SUBS
+    # 称呼词/深度思考：带参数才是写，裸命令是查询
+    if action in ('alias', 'thinking'):
+        return bool((arg or '').strip())
+    return False
 
 
 class main(Plugin):
@@ -113,6 +143,10 @@ class main(Plugin):
         self.live = LiveManager(self, log=self.log)
         self.watchers = WatcherManager(self)
         self.qzone = QzoneClient(self)
+        self.qzone_watch = QzoneWatcher(self, log=self.log)
+        # 后台整理（裁剪消息/用量/空间事件），随插件生命周期起停
+        self.housekeeper = Housekeeper(self, log=self.log)
+        self._backfill_task = None
         self.loop = LoopManager(self, log=self.log)
         self.engine = Engine(self)
         # 上次运行残留的监测进程登记：死了的标 stopped（活着的继续跑，不杀）
@@ -125,6 +159,10 @@ class main(Plugin):
 
         self._locks: dict[str, asyncio.Lock] = {}
         self._raw_counts: dict[str, int] = {}
+        # 补群名任务（gid -> task），on_stop 统一取消
+        self._name_tasks: dict[str, asyncio.Task] = {}
+        # P1-5：群级生效配置缓存，(gid, settings 内容) -> eff
+        self._cfg_cache: dict[tuple, dict] = {}
         self.bot_id = getattr(globals, 'bot_id', 0) if globals else 0
         self.bot_name = ''
         self.log(f'插件已初始化 v{VERSION}')
@@ -159,6 +197,32 @@ class main(Plugin):
             self.live.start()
         except Exception:
             self.log('实时订阅服务启动异常:\n' + traceback.format_exc(), 'error')
+        try:
+            hooks.unregister()
+            hooks.install_official_hooks(self)
+            self.log(f'hooks 已注册：{len(hooks.registered())} 个')
+        except Exception:
+            self.log('hooks 注册异常:\n' + traceback.format_exc(), 'error')
+        # QQ 空间：先探测通道（WS 优先，HTTP 兜底；official 直接不可用），
+        # 可用才启动"被 @ / 新评论"轮询——没有通道时轮询只会白刷日志
+        try:
+            cap = await self.qzone.refresh(force=True)
+            if cap.available:
+                if self.cfg.get('qzone_watch_on', True):
+                    self.qzone_watch.start(self)
+                self.log(f'QQ 空间：{self.qzone.status_text()}')
+            else:
+                self.log(f'QQ 空间不可用：{cap.why}', 'warn')
+        except Exception:
+            self.log('QQ 空间初始化异常:\n' + traceback.format_exc(), 'error')
+        # 断线/重启补拉群历史：只补本地语料（不进对话窗、不触发回复），
+        # 后台任务跑，启动不被 RPC 拖住；official 通道没有这个 action 会直接跳过
+        self._start_backfill()
+        # 后台整理：晚于补拉启动，避免启动瞬间和补拉抢库
+        try:
+            self.housekeeper.start()
+        except Exception:
+            self.log('后台整理启动异常:\n' + traceback.format_exc(), 'error')
         ttl = float(self.cfg.get('mcp_media_ttl_hours', 6))
         if ttl > 0:
             try:
@@ -171,30 +235,76 @@ class main(Plugin):
         self.log(f'on_start 完成，bot={self.bot_name}({self.bot_id})')
 
     async def _seg(self, name: str, coro):
-        """on_stop 单段隔离：CancelledError 是 BaseException，必须显式兜住，
-        否则一段被取消会腰斩后续全部清理（MCP/LLM 连接泄漏、anyio 跨 task 报错）。"""
+        """on_stop 单段隔离：普通异常记录后继续下一段；CancelledError 记录后
+        重新抛出，让上层知道清理被取消（不能悄悄吞掉取消信号）。"""
         try:
             await coro
+        except Exception as e:
+            self.log(f'on_stop {name} 失败: {type(e).__name__}: {e}', 'warn')
         except BaseException as e:
-            self.log(f'on_stop {name} 中断: {type(e).__name__}: {e}', 'warn')
+            self.log(f'on_stop {name} 被取消: {type(e).__name__}: {e}', 'warn')
+            raise
 
     def _seg_sync(self, name: str, fn):
         try:
             fn()
+        except Exception as e:
+            self.log(f'on_stop {name} 失败: {type(e).__name__}: {e}', 'warn')
         except BaseException as e:
-            self.log(f'on_stop {name} 中断: {type(e).__name__}: {e}', 'warn')
+            self.log(f'on_stop {name} 被取消: {type(e).__name__}: {e}', 'warn')
+            raise
 
     async def on_stop(self):
+        await self._seg('name_tasks.cancel', self._cancel_name_tasks())
         await self._seg('loop.stop_all', self.loop.stop_all())
         await self._seg('tasks.stop', self.tasks.stop())
         await self._seg('scheduler.stop', self.scheduler.stop())
         await self._seg('proactor.stop', self.proactor.stop())
+        await self._seg('qzone_watch.stop', self.qzone_watch.stop())
+        # 关闭 QQ 空间复用的 httpx 连接池（HTTP 兜底/配图下载）
+        await self._seg('qzone.aclose', self.qzone.aclose())
+        await self._seg('backfill.stop', self._stop_backfill())
+        await self._seg('housekeeper.stop', self.housekeeper.stop())
         # 只停 HTTP 服务；监测子进程是分离的，刻意不杀（监测不能中断）
         self._seg_sync('triggers.stop', self.triggers.stop)
         self._seg_sync('live.stop', self.live.stop)
+        self._seg_sync('hooks.unregister', hooks.unregister)
+        self._seg_sync('approvals.cancel_all',
+                      self.engine.approvals.cancel_all)
         await self._seg('mcp.shutdown', self.mcp.shutdown(total_budget=8.0))
         await self._seg('llm.aclose', self.llm.aclose())
+        # 群锁/配置缓存都是进程内临时状态，下次 on_start 重建
+        self._locks.clear()
+        self._cfg_cache.clear()
         self.log('on_stop 完成')
+
+    def _start_backfill(self):
+        """启动一次群历史补拉（后台任务，不阻塞 on_start）。"""
+        try:
+            if self._backfill_task is not None and not self._backfill_task.done():
+                return
+            self._backfill_task = asyncio.create_task(self._run_backfill())
+        except Exception:
+            self.log('群历史补拉启动异常:\n' + traceback.format_exc(), 'warn')
+
+    async def _run_backfill(self):
+        try:
+            r = await backfill.run(self, self.cfg)
+            if r.get('added'):
+                self.log(f'群历史补拉：{r["groups"]} 个群补 {r["added"]} 条')
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self.log('群历史补拉异常:\n' + traceback.format_exc(), 'warn')
+
+    async def _stop_backfill(self):
+        task, self._backfill_task = self._backfill_task, None
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
 
     # ── 工具方法（供 Engine/Web 使用）──────────────────────────
 
@@ -220,9 +330,37 @@ class main(Plugin):
             self._locks[gid] = lk
         return lk
 
-    def _record_raw(self, gid: str, parsed, eff: dict):
+    @staticmethod
+    def _settings_key(settings) -> str:
+        """群 settings 的稳定指纹（P1-5 缓存 key 的一半）。"""
         try:
-            rid = storage.insert_raw_message(
+            return json.dumps(settings or {}, sort_keys=True,
+                              ensure_ascii=False, default=str)
+        except (TypeError, ValueError):
+            return repr(settings)
+
+    def cfg_for_group(self, gid: str, settings) -> dict:
+        """群级生效配置（缓存命中直接复用）。
+
+        P1-5：deepseek.handle_message 与 engine.handle 原本各算一次
+        resolve_group；settings 内容不变时第二次起命中缓存。容量 128，
+        满了整体清空；reload_cfg 时清空。返回的 dict 只读，不要原地改。
+        """
+        key = (str(gid), self._settings_key(settings))
+        hit = self._cfg_cache.get(key)
+        if hit is not None:
+            return hit
+        eff = resolve_group(self.cfg, settings)
+        if len(self._cfg_cache) >= 128:
+            self._cfg_cache.clear()
+        self._cfg_cache[key] = eff
+        return eff
+
+    async def _record_raw(self, gid: str, parsed, eff: dict):
+        """原始语料落库 + 每 200 条裁剪。P0-1：sqlite 写丢线程池。"""
+        try:
+            rid = await asyncio.to_thread(
+                storage.insert_raw_message,
                 self.db_path, gid, parsed.sender_id,
                 parsed.sender_card or parsed.sender_name, parsed.text)
             # 回填给引擎：背景消息游标以它为上界（异常/未记录时保持 0）
@@ -233,8 +371,10 @@ class main(Plugin):
             n = self._raw_counts.get(gid, 0) + 1
             self._raw_counts[gid] = n
             if n % 200 == 0:
-                storage.trim_raw(
-                    self.db_path, gid, int(eff.get('raw_corpus_cap', 3000)))
+                await asyncio.to_thread(
+                    storage.trim_raw,
+                    self.db_path, gid,
+                    int(eff.get('raw_corpus_cap', 3000)))
         except Exception:
             self.log('原始语料落库异常:\n' + traceback.format_exc())
 
@@ -274,6 +414,8 @@ class main(Plugin):
             self._raw_config = raw
         merged = merge_config(self._raw_config)
         self.cfg = merged
+        # P1-5：配置变了，群级生效配置缓存立即失效
+        self._cfg_cache.clear()
         self.save_config(merged)
         self._raw_config = dict(merged)
         # 服务商列表可能已删除条目，顺手关掉对应缓存客户端
@@ -314,6 +456,8 @@ class main(Plugin):
 
         gid = str(event.group_id)
         group_row = storage.get_or_create_group(self.db_path, gid)
+        if not group_row.get('group_name'):
+            self._schedule_group_name(gid)
 
         # 群友名片/昵称即时入目录：回复里的 @昵称 才能发成真艾特
         self.members.observe(gid, parsed.sender_id,
@@ -338,10 +482,11 @@ class main(Plugin):
         self._emit_chat_live(gid, parsed, 'group')
 
         # 全量群聊语料（仅已开启群、0 token）：风格学习原料 + 触发前背景消息来源
-        eff = resolve_group(self.cfg, group_row.get('settings'))
+        # P1-5：群级配置走缓存（与 engine.handle 共用同一份，避免算两遍）
+        eff = self.cfg_for_group(gid, group_row.get('settings'))
         if (eff.get('ambient_context_on', True)
                 or eff.get('learn_style_on', True)):
-            self._record_raw(gid, parsed, eff)
+            await self._record_raw(gid, parsed, eff)
 
         # 仅@触发：没 @ 她、没回复她、也没叫她名字的群消息不进 AI，
         # 也不投长跑插队；语料已先落库（风格学习仍需要全量聊天）
@@ -358,12 +503,53 @@ class main(Plugin):
             return
 
         async with self.group_lock(gid):
-            # 锁内重新读取（指令可能刚改过设置）
-            row = storage.get_group(self.db_path, gid)
+            # 锁内重新读取（指令可能刚改过设置）；P0-1：同步查询丢线程池
+            row = await asyncio.to_thread(storage.get_group, self.db_path, gid)
             try:
                 await self.engine.handle(event, parsed, row)
             except Exception:
                 self.log('对话处理异常:\n' + traceback.format_exc())
+
+    def _schedule_group_name(self, gid: str):
+        """首次见到某群时异步补一次群名（失败无副作用，下条消息再试）。
+
+        P1-9：task 存进 self._name_tasks，on_stop 时统一 cancel+gather，
+        避免关停后后台任务还在跑 RPC / 写库。
+        """
+        if gid in self._name_tasks:
+            return
+        try:
+            task = asyncio.get_running_loop().create_task(
+                self._fill_group_name(gid))
+        except RuntimeError:
+            return
+        self._name_tasks[gid] = task
+
+    async def _cancel_name_tasks(self):
+        """on_stop：取消未完成的补群名任务并回收（不让它们跨关停存活）。"""
+        tasks = [t for t in self._name_tasks.values() if not t.done()]
+        self._name_tasks.clear()
+        for t in tasks:
+            t.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _fill_group_name(self, gid: str):
+        try:
+            bot = self.bot
+            data = None
+            if bot is not None and gid.isdigit():
+                data = await bot.call_api('get_group_info', {'group_id': int(gid)})
+            name = (data or {}).get('group_name') if isinstance(data, dict) else ''
+            if name:
+                storage.upsert_group(self.db_path, gid, group_name=name)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self.log('补群名失败 %s:\n%s' % (gid, traceback.format_exc()))
+        finally:
+            if self._name_tasks.get(gid) is asyncio.current_task():
+                self._name_tasks.pop(gid, None)
 
     @Plugin.on_notice("notice")
     async def handle_notice(self, event):
@@ -377,6 +563,9 @@ class main(Plugin):
         try:
             found = self_group_join_notice(event, self.bot_id)
             if found is None:
+                # NapCat 扩展通知（戳一戳/资料赞/群名变更/表情回应…）走策略表：
+                # 该回的回、该忽略的明确忽略，不让它们"看起来坏了"
+                await notices.handle(self, event)
                 return
             gid, _operator = found
             if not self.cfg.get('join_greet_on', True):
@@ -428,6 +617,13 @@ class main(Plugin):
 
         # 以 QQ 号为键复用群会话的全部设施（人设/上下文/工具/沙箱）
         row = storage.get_or_create_group(self.db_path, uid)
+        # 私聊会话与群共用 groups 表：打上 chat_type 标记，
+        # 提醒/定时唤醒等后台任务据此选择 private 发送通道
+        if (row.get('settings') or {}).get('chat_type') != 'private':
+            _settings = dict(row.get('settings') or {})
+            _settings['chat_type'] = 'private'
+            storage.upsert_group(self.db_path, uid, settings=_settings)
+            row = storage.get_group(self.db_path, uid) or row
         if await self._maybe_interrupt(parsed, row, 'private'):
             return
         try:
@@ -449,7 +645,7 @@ class main(Plugin):
         if self.loop.is_running(uid) and self._divert_to_loop(uid, parsed):
             return
         async with self.group_lock(uid):
-            row = storage.get_group(self.db_path, uid)
+            row = await asyncio.to_thread(storage.get_group, self.db_path, uid)
             try:
                 await self.engine.handle(event, parsed, row)
             except Exception:
@@ -465,7 +661,7 @@ class main(Plugin):
         if directive is None:
             return False
         gid = str(group_row['group_id'])
-        eff = resolve_group(self.cfg, group_row.get('settings'))
+        eff = self.cfg_for_group(gid, group_row.get('settings'))
         if not eff.get('interrupt_on', True):
             return True  # 本群关闭：吞掉，不进 AI
         if not directive:
@@ -489,8 +685,9 @@ class main(Plugin):
 
         返回 True 表示已分流（调用方不要再走群锁路径）。
         """
-        display_text = self.engine._user_display_text(parsed)
-        item = self.engine.build_interrupt_item(parsed, display_text)
+        name_cache: dict = {}
+        display_text = self.engine._user_display_text(parsed, name_cache)
+        item = self.engine.build_interrupt_item(parsed, display_text, name_cache)
         if self.interrupts.push(gid, item):
             self.log(f'{gid} 长跑中收到消息，已投插队通道：'
                      f'{item["sender_name"]} → {display_text[:60]}', 'warn')
@@ -515,14 +712,47 @@ class main(Plugin):
             return True  # 命中前缀但非主人：吞掉，不进 AI
         action, arg = parsed_cmd
         gid = str(group_row['group_id'])
-        reply = await self._run_command(action, arg, group_row, gid)
+        if _command_mutates(action, arg):
+            # P1-8：会改群状态的指令与对话轮共用群锁，避免一边读旧配置
+            # 一边被改；两个调用点（handle_message/_handle_private）都在
+            # 锁外，这里加锁不会重入死锁。长跑的 approve/reject 例外：
+            # 正在等审批的那一轮持着群锁，加锁必死锁，故走无锁分支。
+            async with self.group_lock(gid):
+                reply = await self._run_command(action, arg, group_row, gid)
+        else:
+            reply = await self._run_command(action, arg, group_row, gid)
         if reply:
             await self.bot.send_message(message=reply, target_id=gid,
                                         message_type=chat_type)
         return True
 
+    async def _approval_cmd(self, arg: str, approved: bool) -> str:
+        m = re.search(r'\d+', arg or '')
+        if not m:
+            return '用法：/ai 批准 <id> 或 /ai 拒绝 <id>'
+        aid = int(m.group(0))
+        ok = await self.engine.approvals.decide(
+            aid, approved, f'{self.bot_id}')
+        if not ok:
+            return f'#{aid} 不存在或已处理'
+        return f'#{aid} 已{"批准" if approved else "拒绝"}'
+
     async def _run_command(self, action: str, arg: str, group_row: dict,
                            gid: str) -> str:
+        if action in ('approve', 'reject'):
+            return await self._approval_cmd(arg, action == 'approve')
+        if action == 'approvals':
+            try:
+                rows = self.engine.approvals.pending()
+            except Exception:
+                rows = []
+            if not rows:
+                return '当前没有待审批的请求'
+            lines = ['待审批：']
+            for r in rows[:10]:
+                lines.append(f"#{r.get('id')} {r.get('tool_key')} "
+                             f"{r.get('args_preview') or ''}")
+            return '\n'.join(lines)
         if action == 'enable':
             storage.upsert_group(self.db_path, gid, enabled=True)
             return '✅ 本群 AI 已开启'
@@ -697,13 +927,27 @@ class main(Plugin):
                  'qzone.publish': '发QQ空间说说（主人）',
                  'qzone.delete': '删QQ空间说说（主人）',
                  'qzone.recent': '查本机器人空间留痕',
+                 'qzone.list': '读空间说说列表',
+                 'qzone.detail': '看说说正文和评论树',
+                 'qzone.images': '看空间配图',
+                 'qzone.feeds': '看好友动态',
+                 'qzone.comment': '评论/回复空间评论（主人）',
+                 'qzone.like': '空间点赞（主人）',
                  'message.read_image': '回看消息里的图片',
                  'message.save_image': '保存消息图片到工作区',
                  'message.read_forward': '展开合并转发',
                  'meme.lookup': '梗指南查梗'}
+        # 空间工具只在通道可用时列出来：official / 老版 NapCat 下它们本来
+        # 就被引擎摘掉了，这里再列一遍会让人以为「明明没开却显示有」
+        qz_ok = bool(getattr(self, 'qzone', None)
+                     and self.qzone.available())
         for key in _ALL_TOOL_KEYS:
+            if not qz_ok and key.startswith('qzone.'):
+                continue
             on = overrides.get(key, True)
             lines.append(f'{"✅" if on else "❌"} {names.get(key, key)}')
+        if not qz_ok:
+            lines.append('（QQ 空间工具未列出：当前通道没有空间接口）')
         for s in self.mcp.enabled_servers():
             lines.append(f'🔌 MCP {s["id"]}（{s["status"]}）：'
                          f'{len(s["tools"])} 个工具已缓存')

@@ -10,6 +10,7 @@ import json
 import os
 import random
 import re
+import threading
 import uuid
 
 from .asyncutil import wait_resilient
@@ -121,6 +122,9 @@ class LLMClient:
         # provider id -> (AsyncOpenAI, 签名(api_key, base_url))
         self._clients = {}
         self._sigs = {}
+        # 缓存会被主循环线程与 Flask/SocketIO 线程同时访问（保存配置会
+        # prune_clients），必须加锁；性能审计 P1-4。
+        self._lock = threading.RLock()
         # opencode 系中转要求 x-opencode-session 头；进程内固定一个会话 id
         self._opencode_session = uuid.uuid4().hex
         # 插件构造完 PromptStore 后挂上来；None 时全部用 prompts.py 默认文案
@@ -141,30 +145,47 @@ class LLMClient:
             api_key = os.environ.get('DEEPSEEK_API_KEY', '')
         base_url = (provider.get('base_url') or '').strip() or 'https://api.deepseek.com'
         sig = (api_key, base_url)
-        existing = self._clients.get(pid)
-        if existing is not None and self._sigs.get(pid) == sig:
-            return existing
-        from openai import AsyncOpenAI  # 延迟导入
-        kw = dict(api_key=api_key or 'missing-key',
-                  base_url=base_url, timeout=60.0)
-        # opencode 系中转：服务商 id 或 base_url 带 opencode 即补会话头
-        if pid == 'opencode' or 'opencode' in base_url.lower():
-            kw['default_headers'] = {
-                'x-opencode-session': self._opencode_session}
-        client = AsyncOpenAI(**kw)
-        if existing is not None:
-            self._schedule_close(existing)
-        self._clients[pid] = client
-        self._sigs[pid] = sig
-        return client
+        with self._lock:
+            existing = self._clients.get(pid)
+            if existing is not None and self._sigs.get(pid) == sig:
+                return existing
+            from openai import AsyncOpenAI  # 延迟导入
+            kw = dict(api_key=api_key or 'missing-key',
+                      base_url=base_url, timeout=60.0)
+            # opencode 系中转：服务商 id 或 base_url 带 opencode 即补会话头
+            if pid == 'opencode' or 'opencode' in base_url.lower():
+                kw['default_headers'] = {
+                    'x-opencode-session': self._opencode_session}
+            client = AsyncOpenAI(**kw)
+            if existing is not None:
+                self._schedule_close(existing)
+            self._clients[pid] = client
+            self._sigs[pid] = sig
+            return client
 
     def _schedule_close(self, client) -> None:
-        """best-effort 关闭旧客户端：框架主循环在跑就调度，否则放弃（GC 兜底）。"""
+        """best-effort 关闭旧客户端：能拿到运行中的主循环就调度，否则放弃（GC 兜底）。
+
+        性能/并发审计 P1-4：原实现无条件 `loop.create_task(...)`，从 Flask
+        线程调用会抛 RuntimeError（闭包外层 try 静默吞掉 → 客户端永不关闭、
+        aiohttp 会话泄漏）。这里区分「当前就在 loop 线程」与「跨线程」。
+        """
+        if client is None:
+            return
         try:
+            async def _close():
+                await self._safe_close(client)
+            try:
+                running = asyncio.get_running_loop()
+            except RuntimeError:
+                running = None
+            if running is not None:
+                running.create_task(_close())
+                return
             from core import globals
             loop = getattr(globals, 'event_loop', None)
             if loop is not None and loop.is_running():
-                loop.create_task(self._safe_close(client))
+                asyncio.run_coroutine_threadsafe(_close(), loop)
         except Exception:
             pass
 
@@ -177,20 +198,30 @@ class LLMClient:
 
     async def aclose(self):
         try:
-            for client in list(self._clients.values()):
+            with self._lock:
+                clients = list(self._clients.values())
+            for client in clients:
                 # 单个 close 有界等待且隔离外层取消，坏 client 不连累其余关闭
                 await wait_resilient(client.close(), timeout=5.0)
         finally:
-            self._clients = {}
-            self._sigs = {}
+            with self._lock:
+                self._clients = {}
+                self._sigs = {}
 
     def prune_clients(self, active_ids) -> None:
-        """配置里删掉服务商后，清掉对应缓存客户端（best-effort）。"""
+        """配置里删掉服务商后，清掉对应缓存客户端（best-effort）。
+
+        加锁 + 先摘除再关闭：关闭动作可能跨线程调度，不能持锁等待。
+        """
         active = set(active_ids or ())
-        for pid in list(self._clients):
-            if pid not in active:
-                self._schedule_close(self._clients.pop(pid, None))
-                self._sigs.pop(pid, None)
+        stale = []
+        with self._lock:
+            for pid in list(self._clients):
+                if pid not in active:
+                    stale.append(self._clients.pop(pid, None))
+                    self._sigs.pop(pid, None)
+        for client in stale:
+            self._schedule_close(client)
 
     def _resolve(self, cfg: dict, route: str, model):
         """把 chat 的 route/model 入参解析成 (provider, model_id)。
@@ -417,11 +448,15 @@ class LLMClient:
             name = str(e.get('name', '')).strip()
             if not text or not name:
                 continue
+            try:
+                importance = min(1.0, max(0.0, float(e.get('importance', 0.6) or 0.6)))
+            except (TypeError, ValueError):
+                importance = 0.6
             clean.append({
                 'name': name,
                 'text': text[:200],
                 'tags': str(e.get('tags', '其他'))[:20],
-                'importance': min(1.0, max(0.0, float(e.get('importance', 0.6) or 0.6))),
+                'importance': importance,
                 'op': 'update' if str(e.get('op', 'add')).lower() == 'update' else 'add',
             })
         commitments = self._clean_commitments(
